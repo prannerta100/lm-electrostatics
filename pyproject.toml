@@ -1,0 +1,30 @@
+[project]
+name = "lm-electrostatics"
+version = "0.1.0"
+description = "exploring the vector space structure of language models"
+authors = [
+    {name = "Your Name",email = "you@example.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "torch (>=2.10.0,<3.0.0)",
+    "transformers (>=5.3.0,<6.0.0)",
+    "matplotlib (>=3.10.8,<4.0.0)",
+    "numpy (>=2.4.2,<3.0.0)"
+]
+
+
+[tool.poetry]
+packages = [{include = "lm_electrostatics", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.2,<10.0.0)"
+]
