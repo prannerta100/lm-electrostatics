@@ -15,7 +15,7 @@ def load_model(device=None):
     """
     if device is None:
         device = get_device()
-    model = GPT2LMHeadModel.from_pretrained("gpt2")
+    model = GPT2LMHeadModel.from_pretrained("gpt2", attn_implementation="eager")
     model.eval()
     model.to(device)
     for param in model.parameters():
@@ -77,3 +77,17 @@ def get_layer_output_fn(model, layer_idx):
         return hidden.squeeze(0).reshape(-1)
 
     return fn
+
+
+def compute_perplexity(model, tokenizer, text):
+    """
+    Compute perplexity of text under the model.
+    PPL = exp(cross-entropy loss).
+    """
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(
+        next(model.parameters()).device
+    )
+    with torch.no_grad():
+        outputs = model(input_ids, labels=input_ids)
+        loss = outputs.loss
+    return torch.exp(loss).item()
