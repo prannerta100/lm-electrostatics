@@ -1,6 +1,47 @@
 import torch
 
 
+def exact_divergence(fn, x, chunk_size=0):
+    """
+    Exact divergence: div(F) = Tr(J) = Σᵢ ∂Fᵢ/∂xᵢ.
+
+    When chunk_size=0: computes the full Jacobian via torch.autograd.functional.jacobian,
+    then takes the trace. Requires O(d²) memory.
+
+    When chunk_size>0: computes diagonal elements of J in chunks using
+    vjp with one-hot vectors, requiring only O(chunk_size) memory per step.
+    This is essential for large models where the full d×d Jacobian won't fit in GPU memory.
+
+    Args:
+        fn: Callable R^d -> R^d (must be differentiable)
+        x: Input tensor (d,)
+        chunk_size: If >0, compute trace in chunks of this size to save memory.
+                    If 0, compute full Jacobian (fast but memory-intensive).
+
+    Returns:
+        float: Exact divergence
+    """
+    x = x.float()
+
+    if chunk_size <= 0:
+        J = torch.autograd.functional.jacobian(fn, x)
+        return torch.trace(J).item()
+
+    # Chunked: compute Tr(J) = Σᵢ eᵢᵀ J eᵢ using vjp
+    d = x.shape[0]
+    trace_val = 0.0
+    for start in range(0, d, chunk_size):
+        end = min(start + chunk_size, d)
+        for i in range(start, end):
+            e_i = torch.zeros(d, dtype=x.dtype, device=x.device)
+            e_i[i] = 1.0
+            _, vjp_val = torch.autograd.functional.vjp(fn, x, e_i)
+            trace_val += vjp_val[i].item()
+        if x.is_cuda:
+            torch.cuda.empty_cache()
+    return trace_val
+
+
 def estimate_divergence(fn, x, n_samples=50):
     """
     Hutchinson trace estimator: div(F) = Tr(J) ≈ (1/K) Σ vᵀ(Jv)
@@ -16,6 +57,7 @@ def estimate_divergence(fn, x, n_samples=50):
     Returns:
         float: Estimated divergence
     """
+    x = x.float()
     d = x.shape[0]
     trace_sum = 0.0
     for _ in range(n_samples):
@@ -43,6 +85,7 @@ def estimate_asymmetry(fn, x, n_samples=50):
     Returns:
         float: Asymmetry in [0, 1]. 0 = perfectly conservative.
     """
+    x = x.float()
     d = x.shape[0]
     eps = 1e-8
     asym_sum = 0.0

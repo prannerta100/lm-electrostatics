@@ -1,5 +1,5 @@
 import torch
-from lm_electrostatics.divergence import estimate_divergence, estimate_asymmetry
+from lm_electrostatics.divergence import exact_divergence, estimate_divergence, estimate_asymmetry
 
 
 def test_divergence_of_identity():
@@ -56,3 +56,25 @@ def test_divergence_of_scaled():
     x = torch.randn(d)
     div = estimate_divergence(scale_fn, x, n_samples=200)
     assert abs(div - 2 * d) < 2 * d * 0.15, f"Expected ~{2*d}, got {div}"
+
+
+def test_exact_divergence_identity():
+    """Exact: div(identity) = dimension."""
+    def identity(x):
+        return x.clone()
+    d = 50
+    x = torch.randn(d)
+    div = exact_divergence(identity, x)
+    assert abs(div - d) < 1e-3, f"Expected exactly {d}, got {div}"
+
+
+def test_exact_divergence_linear():
+    """Exact: div(Ax) = Tr(A)."""
+    d = 30
+    A = torch.randn(d, d)
+    def linear_fn(x):
+        return A @ x
+    x = torch.randn(d)
+    div = exact_divergence(linear_fn, x)
+    expected = torch.trace(A).item()
+    assert abs(div - expected) < 1e-3, f"Expected {expected}, got {div}"

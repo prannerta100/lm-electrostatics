@@ -1,5 +1,5 @@
 import torch
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def get_device():
@@ -7,39 +7,98 @@ def get_device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_model(device=None):
+def load_model(model_name="gpt2", device=None, dtype=None):
     """
-    Load pre-trained 'gpt2' (124M) in eval mode.
+    Load a pre-trained causal LM in eval mode.
     Returns (model, tokenizer).
-    Moves model to device. Freezes all parameters.
+
+    Args:
+        model_name: HuggingFace model name (e.g. "gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl")
+        device: Device string. Auto-detected if None.
+        dtype: torch dtype (e.g. torch.float32, torch.bfloat16). None = model default.
     """
     if device is None:
         device = get_device()
-    model = GPT2LMHeadModel.from_pretrained("gpt2", attn_implementation="eager")
+
+    load_kwargs = {"attn_implementation": "eager"}
+    if dtype is not None:
+        load_kwargs["torch_dtype"] = dtype
+
+    model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     model.eval()
     model.to(device)
     for param in model.parameters():
         param.requires_grad = False
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
+
+
+def _get_transformer_backbone(model):
+    """Get the transformer backbone from a causal LM model (handles different architectures)."""
+    # GPT-2 style
+    if hasattr(model, "transformer"):
+        return model.transformer
+    # LLaMA / Mistral / Qwen style
+    if hasattr(model, "model"):
+        return model.model
+    raise ValueError(f"Unsupported model architecture: {type(model).__name__}")
+
+
+def _get_embed_dim(model):
+    """Get hidden dimension from model config."""
+    config = model.config
+    for attr in ("n_embd", "hidden_size", "d_model"):
+        if hasattr(config, attr):
+            return getattr(config, attr)
+    raise ValueError(f"Cannot determine hidden size from config: {type(config).__name__}")
+
+
+def _get_layers(model):
+    """Get the list of transformer layers/blocks."""
+    backbone = _get_transformer_backbone(model)
+    # GPT-2: backbone.h
+    if hasattr(backbone, "h"):
+        return backbone.h
+    # LLaMA / Mistral / Qwen: backbone.layers
+    if hasattr(backbone, "layers"):
+        return backbone.layers
+    raise ValueError(f"Cannot find transformer layers in {type(backbone).__name__}")
+
+
+def _get_num_layers(model):
+    """Get number of transformer layers."""
+    return len(_get_layers(model))
 
 
 def get_embedding(model, input_ids):
     """
-    Compute X_0 = W_e[input_ids] + W_p[positions].
+    Compute X_0 = embedding(input_ids).
+
+    Handles GPT-2 (wte + wpe) and LLaMA-style (embed_tokens) architectures.
 
     Args:
-        model: GPT2LMHeadModel
+        model: CausalLM model
         input_ids: (1, S) tensor
 
     Returns:
-        X_0 as (S, H) tensor, detached, with requires_grad=True
+        X_0 as (S, H) tensor, detached, with requires_grad=True, in float32
     """
+    backbone = _get_transformer_backbone(model)
     S = input_ids.shape[1]
     device = input_ids.device
-    positions = torch.arange(S, device=device)
-    x0 = model.transformer.wte(input_ids) + model.transformer.wpe(positions)
-    x0 = x0.squeeze(0).detach().clone()
+
+    if hasattr(backbone, "wte") and hasattr(backbone, "wpe"):
+        # GPT-2 style: token embedding + position embedding
+        positions = torch.arange(S, device=device)
+        x0 = backbone.wte(input_ids) + backbone.wpe(positions)
+    elif hasattr(backbone, "embed_tokens"):
+        # LLaMA / Mistral / Qwen style
+        x0 = backbone.embed_tokens(input_ids)
+    else:
+        raise ValueError(f"Cannot find embedding layers in {type(backbone).__name__}")
+
+    x0 = x0.squeeze(0).detach().clone().float()
     x0.requires_grad_(True)
     return x0
 
@@ -52,23 +111,22 @@ def get_layer_output_fn(model, layer_idx):
     Manually iterates through transformer blocks 0..layer_idx.
 
     Args:
-        model: GPT2LMHeadModel
+        model: CausalLM model
         layer_idx: int, 0-indexed (0 to L-1)
 
     Returns:
         Callable that takes (S*H,) tensor and returns (S*H,) tensor
     """
+    H = _get_embed_dim(model)
+    layers = _get_layers(model)
 
     def fn(x0_flat):
-        S = x0_flat.shape[0] // model.config.n_embd
-        H = model.config.n_embd
+        S = x0_flat.shape[0] // H
         hidden = x0_flat.view(1, S, H)
 
         for i in range(layer_idx + 1):
-            block = model.transformer.h[i]
+            block = layers[i]
             outputs = block(hidden)
-            # transformers v5+ returns a tensor directly;
-            # older versions return a tuple where [0] is the hidden state
             if isinstance(outputs, torch.Tensor):
                 hidden = outputs
             else:
