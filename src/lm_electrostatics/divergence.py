@@ -83,7 +83,7 @@ def estimate_asymmetry(fn, x, n_samples=50):
         n_samples: Number of random vectors K
 
     Returns:
-        float: Asymmetry in [0, 1]. 0 = perfectly conservative.
+        float: Asymmetry in [0, 2]. 0 = perfectly symmetric (conservative), 2 = purely antisymmetric.
     """
     x = x.float()
     d = x.shape[0]

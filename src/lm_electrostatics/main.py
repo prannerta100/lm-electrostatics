@@ -8,7 +8,7 @@ import json
 import os
 import time
 import torch
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 from lm_electrostatics.equations import (
     load_model,
@@ -109,60 +109,86 @@ def parse_layer_indices(spec, num_layers):
 
 
 def make_plots(results, layer_indices, output_dir):
-    """Generate and save plots."""
+    """Generate and save interactive (HTML) and static (PNG) plots."""
     os.makedirs(output_dir, exist_ok=True)
 
-    # Plot 1: Divergence vs Perplexity
-    fig, ax = plt.subplots(figsize=(8, 6))
-    for i, r in enumerate(results):
-        color = "blue" if r["label"] == "in" else "red"
-        ax.scatter(r["perplexity"], r["avg_divergence"], c=color, s=80, zorder=3)
-        ax.annotate(str(i), (r["perplexity"], r["avg_divergence"]),
-                    textcoords="offset points", xytext=(5, 5), fontsize=8)
-    ax.set_xlabel("Perplexity")
-    ax.set_ylabel("Average Divergence Tr(J) [exact]")
-    ax.set_title("Exact Divergence vs Perplexity")
-    ax.scatter([], [], c="blue", label="In-distribution")
-    ax.scatter([], [], c="red", label="Out-of-distribution")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "divergence_vs_perplexity.png"), dpi=150)
-    print(f"Saved {output_dir}/divergence_vs_perplexity.png")
+    in_results = [r for r in results if r["label"] == "in"]
+    out_results = [r for r in results if r["label"] == "out"]
 
-    # Plot 2: Asymmetry vs Perplexity
-    fig, ax = plt.subplots(figsize=(8, 6))
-    for i, r in enumerate(results):
-        color = "blue" if r["label"] == "in" else "red"
-        ax.scatter(r["perplexity"], r["avg_asymmetry"], c=color, s=80, zorder=3)
-        ax.annotate(str(i), (r["perplexity"], r["avg_asymmetry"]),
-                    textcoords="offset points", xytext=(5, 5), fontsize=8)
-    ax.set_xlabel("Perplexity")
-    ax.set_ylabel("Average Jacobian Asymmetry")
-    ax.set_title("Jacobian Asymmetry vs Perplexity")
-    ax.scatter([], [], c="blue", label="In-distribution")
-    ax.scatter([], [], c="red", label="Out-of-distribution")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "asymmetry_vs_perplexity.png"), dpi=150)
-    print(f"Saved {output_dir}/asymmetry_vs_perplexity.png")
+    def _hover_text(r):
+        return f"{r['text'][:80]}...<br>PPL={r['perplexity']:.2f}, div={r['avg_divergence']:.2f}"
 
-    # Plot 3: Divergence vs Layer
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # --- Plot 1: Divergence vs Perplexity (interactive) ---
+    fig = go.Figure()
+    for label, group, color in [("In-distribution", in_results, "blue"), ("Out-of-distribution", out_results, "red")]:
+        fig.add_trace(go.Scatter(
+            x=[r["perplexity"] for r in group],
+            y=[r["avg_divergence"] for r in group],
+            mode="markers+text",
+            marker=dict(size=10, color=color),
+            text=[str(results.index(r)) for r in group],
+            textposition="top right",
+            textfont=dict(size=9),
+            hovertext=[_hover_text(r) for r in group],
+            hoverinfo="text",
+            name=label,
+        ))
+    fig.update_layout(
+        title="Exact Divergence vs Perplexity",
+        xaxis_title="Perplexity",
+        yaxis_title="Average Divergence Tr(J) [exact]",
+        hovermode="closest",
+    )
+    fig.write_html(os.path.join(output_dir, "divergence_vs_perplexity.html"))
+    print(f"Saved {output_dir}/divergence_vs_perplexity.html")
+
+    # --- Plot 2: Asymmetry vs Perplexity (interactive) ---
+    fig = go.Figure()
+    for label, group, color in [("In-distribution", in_results, "blue"), ("Out-of-distribution", out_results, "red")]:
+        fig.add_trace(go.Scatter(
+            x=[r["perplexity"] for r in group],
+            y=[r["avg_asymmetry"] for r in group],
+            mode="markers+text",
+            marker=dict(size=10, color=color),
+            text=[str(results.index(r)) for r in group],
+            textposition="top right",
+            textfont=dict(size=9),
+            hovertext=[_hover_text(r) for r in group],
+            hoverinfo="text",
+            name=label,
+        ))
+    fig.update_layout(
+        title="Jacobian Asymmetry vs Perplexity",
+        xaxis_title="Perplexity",
+        yaxis_title="Average Jacobian Asymmetry",
+        hovermode="closest",
+    )
+    fig.write_html(os.path.join(output_dir, "asymmetry_vs_perplexity.html"))
+    print(f"Saved {output_dir}/asymmetry_vs_perplexity.html")
+
+    # --- Plot 3: Divergence vs Layer (interactive) ---
+    fig = go.Figure()
     for i, r in enumerate(results):
         color = "blue" if r["label"] == "in" else "red"
         divs = [r["divergences"][l] for l in layer_indices]
-        ax.plot(layer_indices, divs, marker="o", color=color, alpha=0.6, label=f"[{i}] {r['label']}")
-    ax.set_xlabel("Layer Index")
-    ax.set_ylabel("Divergence Tr(J) [exact]")
-    ax.set_title("Divergence vs Layer")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "divergence_vs_layer.png"), dpi=150)
-    print(f"Saved {output_dir}/divergence_vs_layer.png")
-
-    plt.close("all")
+        fig.add_trace(go.Scatter(
+            x=layer_indices,
+            y=divs,
+            mode="lines+markers",
+            marker=dict(size=6, color=color),
+            line=dict(color=color),
+            opacity=0.6,
+            name=f"[{i}] {r['label']} (PPL={r['perplexity']:.1f})",
+            hovertext=r["text"][:60],
+        ))
+    fig.update_layout(
+        title="Divergence vs Layer",
+        xaxis_title="Layer Index",
+        yaxis_title="Divergence Tr(J) [exact]",
+        hovermode="x unified",
+    )
+    fig.write_html(os.path.join(output_dir, "divergence_vs_layer.html"))
+    print(f"Saved {output_dir}/divergence_vs_layer.html")
 
 
 def save_results_json(results, output_dir):

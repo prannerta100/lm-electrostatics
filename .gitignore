@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+
+**docs/
+**plots/
+**results/
+*.csv
+**/.venv/
+**/.pytest_cache/
+plot_scrum_dates.py
