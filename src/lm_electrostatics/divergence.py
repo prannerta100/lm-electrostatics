@@ -1,42 +1,50 @@
 import torch
+from torch.func import jvp as func_jvp, vjp as func_vjp, vmap
 
 
 def exact_divergence(fn, x, chunk_size=0):
     """
     Exact divergence: div(F) = Tr(J) = Σᵢ ∂Fᵢ/∂xᵢ.
 
-    When chunk_size=0: computes the full Jacobian via torch.autograd.functional.jacobian,
-    then takes the trace. Requires O(d²) memory.
+    When chunk_size=0: batched computation of all diagonal elements using
+    vmap over standard basis vectors. Uses O(d) memory for results but
+    batches the forward-mode AD calls for GPU parallelism.
 
-    When chunk_size>0: computes diagonal elements of J in chunks using
-    vjp with one-hot vectors, requiring only O(chunk_size) memory per step.
-    This is essential for large models where the full d×d Jacobian won't fit in GPU memory.
+    When chunk_size>0: same batched approach but processes basis vectors
+    in chunks to limit peak memory usage.
 
     Args:
         fn: Callable R^d -> R^d (must be differentiable)
         x: Input tensor (d,)
-        chunk_size: If >0, compute trace in chunks of this size to save memory.
-                    If 0, compute full Jacobian (fast but memory-intensive).
+        chunk_size: If >0, process basis vectors in chunks of this size.
+                    If 0, process all at once (maximizes GPU utilization).
 
     Returns:
         float: Exact divergence
     """
     x = x.float()
+    d = x.shape[0]
+
+    def _diag_jvp(e_i):
+        """Compute eᵢᵀ J eᵢ = J[i,i] for one basis vector."""
+        _, jv = func_jvp(fn, (x,), (e_i,))
+        return torch.dot(e_i, jv)
 
     if chunk_size <= 0:
-        J = torch.autograd.functional.jacobian(fn, x)
-        return torch.trace(J).item()
+        I = torch.eye(d, dtype=x.dtype, device=x.device)
+        diag = vmap(_diag_jvp)(I)
+        return diag.sum().item()
 
-    # Chunked: compute Tr(J) = Σᵢ eᵢᵀ J eᵢ using vjp
-    d = x.shape[0]
+    # Chunked batched computation
     trace_val = 0.0
     for start in range(0, d, chunk_size):
         end = min(start + chunk_size, d)
-        for i in range(start, end):
-            e_i = torch.zeros(d, dtype=x.dtype, device=x.device)
-            e_i[i] = 1.0
-            _, vjp_val = torch.autograd.functional.vjp(fn, x, e_i)
-            trace_val += vjp_val[i].item()
+        # Build partial identity: only rows start..end
+        chunk = torch.zeros(end - start, d, dtype=x.dtype, device=x.device)
+        for i in range(end - start):
+            chunk[i, start + i] = 1.0
+        diag_chunk = vmap(_diag_jvp)(chunk)
+        trace_val += diag_chunk.sum().item()
         if x.is_cuda:
             torch.cuda.empty_cache()
     return trace_val
@@ -46,12 +54,12 @@ def estimate_divergence(fn, x, n_samples=50):
     """
     Hutchinson trace estimator: div(F) = Tr(J) ≈ (1/K) Σ vᵀ(Jv)
 
-    Uses torch.autograd.functional.jvp for Jv computation.
-    v are Rademacher random vectors (+1/-1 with equal probability).
+    Batched via vmap over Rademacher random vectors — all K jvp calls
+    run as one batched GPU operation instead of K sequential calls.
 
     Args:
         fn: Callable R^d -> R^d (must be differentiable)
-        x: Input tensor (d,) — does NOT need requires_grad (jvp handles it)
+        x: Input tensor (d,)
         n_samples: Number of random vectors K
 
     Returns:
@@ -59,23 +67,24 @@ def estimate_divergence(fn, x, n_samples=50):
     """
     x = x.float()
     d = x.shape[0]
-    trace_sum = 0.0
-    for _ in range(n_samples):
-        v = torch.randint(0, 2, (d,), dtype=x.dtype, device=x.device) * 2 - 1
-        # jvp returns (output, Jv)
-        _, jvp_val = torch.autograd.functional.jvp(fn, x, v)
-        trace_sum += torch.dot(v, jvp_val).item()
-    return trace_sum / n_samples
+    V = torch.randint(0, 2, (n_samples, d), dtype=x.dtype, device=x.device) * 2 - 1
+
+    def _trace_sample(v):
+        _, jv = func_jvp(fn, (x,), (v,))
+        return torch.dot(v, jv)
+
+    traces = vmap(_trace_sample)(V)
+    return traces.mean().item()
 
 
 def estimate_asymmetry(fn, x, n_samples=50):
     """
-    Jacobian asymmetry via random projections.
+    Jacobian asymmetry via random projections (batched).
 
     asymmetry = (1/K) Σ ||Jv - Jᵀv||² / (||Jv||² + ||Jᵀv||² + eps)
 
-    Jv via torch.autograd.functional.jvp (forward-mode)
-    Jᵀv via torch.autograd.functional.vjp (reverse-mode)
+    Jv via batched forward-mode AD (vmap + jvp)
+    Jᵀv via batched reverse-mode AD (vmap + vjp)
 
     Args:
         fn: Callable R^d -> R^d
@@ -88,18 +97,21 @@ def estimate_asymmetry(fn, x, n_samples=50):
     x = x.float()
     d = x.shape[0]
     eps = 1e-8
-    asym_sum = 0.0
-    for _ in range(n_samples):
-        v = torch.randint(0, 2, (d,), dtype=x.dtype, device=x.device) * 2 - 1
+    V = torch.randint(0, 2, (n_samples, d), dtype=x.dtype, device=x.device) * 2 - 1
 
-        # Jv via forward-mode AD
-        _, jv = torch.autograd.functional.jvp(fn, x, v)
+    # Batched Jv via forward-mode
+    def _jvp_one(v):
+        _, jv = func_jvp(fn, (x,), (v,))
+        return jv
 
-        # Jᵀv via reverse-mode AD
-        _, jtv = torch.autograd.functional.vjp(fn, x, v)
+    # Batched Jᵀv via reverse-mode
+    def _vjp_one(v):
+        _, vjp_fn = func_vjp(fn, x)
+        return vjp_fn(v)[0]
 
-        diff_sq = torch.sum((jv - jtv) ** 2).item()
-        norm_sq = torch.sum(jv ** 2).item() + torch.sum(jtv ** 2).item() + eps
-        asym_sum += diff_sq / norm_sq
+    JV = vmap(_jvp_one)(V)    # (K, d)
+    JtV = vmap(_vjp_one)(V)   # (K, d)
 
-    return asym_sum / n_samples
+    diff_sq = ((JV - JtV) ** 2).sum(dim=1)           # (K,)
+    norm_sq = (JV ** 2).sum(dim=1) + (JtV ** 2).sum(dim=1) + eps  # (K,)
+    return (diff_sq / norm_sq).mean().item()

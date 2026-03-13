@@ -12,6 +12,8 @@ import json
 import os
 import random
 import time
+from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import plotly.graph_objects as go
@@ -165,6 +167,8 @@ def main():
     ap.add_argument("--asym-k", type=int, default=20, help="Samples for stochastic asymmetry (default: 20)")
     ap.add_argument("--layers", default="all", help="'all' or comma-separated indices")
     ap.add_argument("--output-dir", default="results")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="Number of sentences to process in parallel via CUDA streams (default: 1)")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -200,24 +204,59 @@ def main():
 
     checkpoint_path = os.path.join(args.output_dir, "results_checkpoint.json")
     pbar = tqdm(all_sents, desc="Analyzing", unit="sent")
+    workers = args.workers
+    use_parallel = torch.cuda.is_available() and workers > 1
 
-    for idx, (text, label) in enumerate(pbar):
-        try:
+    if use_parallel:
+        streams = [torch.cuda.Stream() for _ in range(workers)]
+        print(f"Using {workers} CUDA streams for parallel sentence processing")
+
+    def _process_one(text, label, stream=None):
+        ctx = torch.cuda.stream(stream) if stream else nullcontext()
+        with ctx:
             r = analyze_one(model, tokenizer, text, layer_indices, args.asym_k, args.div_method, args.div_k)
-        except Exception as e:
-            tqdm.write(f"  SKIP [{idx+1}]: {e}")
-            continue
         r["text"] = text
         r["label"] = label
         r["divergences"] = {str(k): v for k, v in r["divergences"].items()}
         r["asymmetries"] = {str(k): v for k, v in r["asymmetries"].items()}
-        results.append(r)
-        avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
-        pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
+        return r
 
-        if (idx + 1) % max(1, total // 20) == 0:
-            with open(checkpoint_path, "w") as f:
-                json.dump(results, f)
+    if use_parallel:
+        for batch_start in range(0, len(all_sents), workers):
+            batch = all_sents[batch_start:batch_start + workers]
+            futures = []
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                for i, (text, label) in enumerate(batch):
+                    stream = streams[i % len(streams)]
+                    futures.append(pool.submit(_process_one, text, label, stream))
+            for s in streams[:len(batch)]:
+                s.synchronize()
+            for fut in futures:
+                try:
+                    r = fut.result()
+                    results.append(r)
+                    avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
+                    pbar.set_postfix(label=r["label"], ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
+                except Exception as e:
+                    tqdm.write(f"  SKIP: {e}")
+                pbar.update(1)
+
+            if (batch_start + workers) % max(1, total // 20) == 0:
+                with open(checkpoint_path, "w") as f:
+                    json.dump(results, f)
+    else:
+        for idx, (text, label) in enumerate(pbar):
+            try:
+                r = _process_one(text, label)
+                results.append(r)
+                avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
+                pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
+            except Exception as e:
+                tqdm.write(f"  SKIP [{idx+1}]: {e}")
+
+            if (idx + 1) % max(1, total // 20) == 0:
+                with open(checkpoint_path, "w") as f:
+                    json.dump(results, f)
 
     # ── save final ──
     final_path = os.path.join(args.output_dir, "results.json")

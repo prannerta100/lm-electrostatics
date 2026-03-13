@@ -119,10 +119,15 @@ def get_layer_output_fn(model, layer_idx):
     """
     H = _get_embed_dim(model)
     layers = _get_layers(model)
+    _model_dtype = next(layers[0].parameters()).dtype
 
     def fn(x0_flat):
         S = x0_flat.shape[0] // H
         hidden = x0_flat.view(1, S, H)
+
+        # Cast to model dtype for forward pass (e.g. bfloat16)
+        if hidden.dtype != _model_dtype:
+            hidden = hidden.to(_model_dtype)
 
         for i in range(layer_idx + 1):
             block = layers[i]
@@ -132,7 +137,8 @@ def get_layer_output_fn(model, layer_idx):
             else:
                 hidden = outputs[0]
 
-        return hidden.squeeze(0).reshape(-1)
+        # Cast back to float32 for autograd
+        return hidden.squeeze(0).reshape(-1).float()
 
     return fn
 
