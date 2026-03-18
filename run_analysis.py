@@ -12,8 +12,6 @@ import json
 import os
 import random
 import time
-from contextlib import nullcontext
-from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import plotly.graph_objects as go
@@ -131,6 +129,31 @@ def plot_asymmetry_histogram(results, layer_indices, out_dir):
     print(f"Saved {path}")
 
 
+def plot_violin_asym_vs_layer(results, layer_indices, out_dir):
+    """Violin: asymmetry distribution per layer, blue=in / red=out."""
+    fig = go.Figure()
+    for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
+        group = [r for r in results if r["label"] == label]
+        for l in layer_indices:
+            vals = [r["asymmetries"][l] for r in group]
+            fig.add_trace(go.Violin(
+                x=[f"L{l}"] * len(vals), y=vals,
+                legendgroup=label, scalegroup=label,
+                name=f"{label}-dist" if l == layer_indices[0] else None,
+                showlegend=(l == layer_indices[0]),
+                side=side, line_color=color,
+                meanline_visible=True,
+            ))
+    fig.update_layout(
+        title="Jacobian Asymmetry per Layer",
+        xaxis_title="Layer", yaxis_title="Asymmetry (0=conservative, 2=antisymmetric)",
+        violinmode="overlay", hovermode="closest",
+    )
+    path = os.path.join(out_dir, "asymmetry_vs_layer_violin.html")
+    fig.write_html(path)
+    print(f"Saved {path}")
+
+
 def plot_div_vs_ppl(results, layer_indices, out_dir):
     """Scatter: last-layer divergence vs perplexity, blue=in / red=out."""
     last_layer = max(layer_indices)
@@ -167,8 +190,6 @@ def main():
     ap.add_argument("--asym-k", type=int, default=20, help="Samples for stochastic asymmetry (default: 20)")
     ap.add_argument("--layers", default="all", help="'all' or comma-separated indices")
     ap.add_argument("--output-dir", default="results")
-    ap.add_argument("--workers", type=int, default=1,
-                    help="Number of sentences to process in parallel via CUDA streams (default: 1)")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -204,59 +225,24 @@ def main():
 
     checkpoint_path = os.path.join(args.output_dir, "results_checkpoint.json")
     pbar = tqdm(all_sents, desc="Analyzing", unit="sent")
-    workers = args.workers
-    use_parallel = torch.cuda.is_available() and workers > 1
 
-    if use_parallel:
-        streams = [torch.cuda.Stream() for _ in range(workers)]
-        print(f"Using {workers} CUDA streams for parallel sentence processing")
-
-    def _process_one(text, label, stream=None):
-        ctx = torch.cuda.stream(stream) if stream else nullcontext()
-        with ctx:
+    for idx, (text, label) in enumerate(pbar):
+        try:
             r = analyze_one(model, tokenizer, text, layer_indices, args.asym_k, args.div_method, args.div_k)
+        except Exception as e:
+            tqdm.write(f"  SKIP [{idx+1}]: {e}")
+            continue
         r["text"] = text
         r["label"] = label
         r["divergences"] = {str(k): v for k, v in r["divergences"].items()}
         r["asymmetries"] = {str(k): v for k, v in r["asymmetries"].items()}
-        return r
+        results.append(r)
+        avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
+        pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
 
-    if use_parallel:
-        for batch_start in range(0, len(all_sents), workers):
-            batch = all_sents[batch_start:batch_start + workers]
-            futures = []
-            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-                for i, (text, label) in enumerate(batch):
-                    stream = streams[i % len(streams)]
-                    futures.append(pool.submit(_process_one, text, label, stream))
-            for s in streams[:len(batch)]:
-                s.synchronize()
-            for fut in futures:
-                try:
-                    r = fut.result()
-                    results.append(r)
-                    avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
-                    pbar.set_postfix(label=r["label"], ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
-                except Exception as e:
-                    tqdm.write(f"  SKIP: {e}")
-                pbar.update(1)
-
-            if (batch_start + workers) % max(1, total // 20) == 0:
-                with open(checkpoint_path, "w") as f:
-                    json.dump(results, f)
-    else:
-        for idx, (text, label) in enumerate(pbar):
-            try:
-                r = _process_one(text, label)
-                results.append(r)
-                avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
-                pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
-            except Exception as e:
-                tqdm.write(f"  SKIP [{idx+1}]: {e}")
-
-            if (idx + 1) % max(1, total // 20) == 0:
-                with open(checkpoint_path, "w") as f:
-                    json.dump(results, f)
+        if (idx + 1) % max(1, total // 20) == 0:
+            with open(checkpoint_path, "w") as f:
+                json.dump(results, f)
 
     # ── save final ──
     final_path = os.path.join(args.output_dir, "results.json")
@@ -271,6 +257,7 @@ def main():
 
     # ── plots ──
     plot_violin_div_vs_layer(results, layer_indices, args.output_dir)
+    plot_violin_asym_vs_layer(results, layer_indices, args.output_dir)
     plot_asymmetry_histogram(results, layer_indices, args.output_dir)
     plot_div_vs_ppl(results, layer_indices, args.output_dir)
 
