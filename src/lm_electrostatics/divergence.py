@@ -2,6 +2,107 @@ import torch
 from torch.func import jvp as func_jvp, vjp as func_vjp, vmap
 
 
+def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k):
+    """
+    Compute Hutchinson divergence and asymmetry at multiple layers efficiently.
+
+    JVP tangent vectors are propagated incrementally block-by-block, so all
+    layers share a single forward pass instead of each layer recomputing from x0.
+    VJP (for asymmetry) still requires per-layer backward passes.
+
+    Args:
+        blocks: list of transformer block modules
+        H: hidden dimension
+        x0: flattened embedding tensor (d,)
+        layer_indices: list of layer indices to measure (must be sorted)
+        div_k: number of Hutchinson samples for divergence
+        asym_k: number of random vectors for asymmetry
+
+    Returns:
+        (divs, asyms): dicts mapping layer_idx -> float
+    """
+    x0 = x0.float()
+    d = x0.shape[0]
+    S = d // H
+    max_layer = max(layer_indices)
+    layer_set = set(layer_indices)
+
+    K = max(div_k, asym_k)
+    V = torch.randint(0, 2, (K, d), dtype=x0.dtype, device=x0.device) * 2 - 1
+
+    # --- Incremental JVP: propagate tangents block by block ---
+    hidden = x0.view(1, S, H)
+    tangents = V.view(K, 1, S, H)
+
+    jv_at_layer = {}
+
+    for i in range(max_layer + 1):
+        block = blocks[i]
+
+        def _make_block_fn(b):
+            def block_fn(h):
+                out = b(h)
+                return out if isinstance(out, torch.Tensor) else out[0]
+            return block_fn
+
+        block_fn = _make_block_fn(block)
+        h_in = hidden  # capture current hidden for JVP
+
+        def _single_jvp(t, _h=h_in, _fn=block_fn):
+            _, jv = func_jvp(_fn, (_h,), (t,))
+            return jv
+
+        tangents = vmap(_single_jvp)(tangents)
+        hidden = block_fn(hidden)
+
+        if i in layer_set:
+            jv_at_layer[i] = tangents.reshape(K, d).clone()
+
+        if x0.is_cuda:
+            torch.cuda.empty_cache()
+
+    # --- Divergence: Tr(J) ≈ (1/K) Σ vᵀ(Jv) ---
+    divs = {}
+    for l in layer_indices:
+        JV = jv_at_layer[l][:div_k]
+        traces = (V[:div_k] * JV).sum(dim=1)
+        divs[l] = traces.mean().item()
+
+    # --- Asymmetry: need VJP per layer (no incremental shortcut) ---
+    asyms = {}
+    eps = 1e-8
+    V_asym = V[:asym_k]
+
+    for l in layer_indices:
+        JV_l = jv_at_layer[l][:asym_k]
+
+        def _make_layer_fn(layer_idx):
+            def fn(x0_flat):
+                h = x0_flat.view(1, S, H)
+                for j in range(layer_idx + 1):
+                    out = blocks[j](h)
+                    h = out if isinstance(out, torch.Tensor) else out[0]
+                return h.squeeze(0).reshape(-1)
+            return fn
+
+        fn_l = _make_layer_fn(l)
+        _, vjp_fn = func_vjp(fn_l, x0)
+
+        def _vjp_one(v, _vjp_fn=vjp_fn):
+            return _vjp_fn(v)[0]
+
+        JtV = vmap(_vjp_one)(V_asym)
+
+        diff_sq = ((JV_l - JtV) ** 2).sum(dim=1)
+        norm_sq = (JV_l ** 2).sum(dim=1) + (JtV ** 2).sum(dim=1) + eps
+        asyms[l] = (diff_sq / norm_sq).mean().item()
+
+        if x0.is_cuda:
+            torch.cuda.empty_cache()
+
+    return divs, asyms
+
+
 def exact_divergence(fn, x, chunk_size=0):
     """
     Exact divergence: div(F) = Tr(J) = Σᵢ ∂Fᵢ/∂xᵢ.

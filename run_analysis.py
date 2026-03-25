@@ -20,28 +20,37 @@ from tqdm import tqdm
 
 from lm_electrostatics.equations import (
     load_model, get_embedding, get_layer_output_fn,
-    compute_perplexity, _get_embed_dim, _get_num_layers,
+    compute_perplexity, _get_embed_dim, _get_num_layers, _get_layers,
 )
-from lm_electrostatics.divergence import exact_divergence, estimate_divergence, estimate_asymmetry
+from lm_electrostatics.divergence import exact_divergence, estimate_divergence, estimate_asymmetry, analyze_layers_hutchinson
 
 
 # ── data ──────────────────────────────────────────────────────
 
-def sample_openwebtext(n, seed=42):
-    """Stream n usable sentences from OpenWebText."""
-    ds = load_dataset("openwebtext", split="train", streaming=True)
-    ds = ds.shuffle(seed=seed, buffer_size=10_000)
-    sentences = []
-    for ex in ds:
-        for line in ex["text"].split("\n"):
-            line = line.strip()
-            if 30 < len(line) < 200 and len(line.split()) >= 6:
-                sentences.append(line)
+def sample_sentences(n, dataset="wikitext", seed=42):
+    """Sample n usable sentences from the specified dataset."""
+    rng = __import__("random").Random(seed)
+    if dataset == "openwebtext":
+        ds = load_dataset("openwebtext", split="train", streaming=True)
+        ds = ds.shuffle(seed=seed, buffer_size=10_000)
+        sentences = []
+        for ex in ds:
+            for line in ex["text"].split("\n"):
+                line = line.strip()
+                if 30 < len(line) < 200 and len(line.split()) >= 6:
+                    sentences.append(line)
+                    break
+            if len(sentences) >= n:
                 break
-        if len(sentences) >= n:
-            break
-    print(f"Sampled {len(sentences)} in-distribution sentences from OpenWebText")
-    return sentences[:n]
+        print(f"Sampled {len(sentences)} in-distribution sentences from OpenWebText")
+        return sentences[:n]
+    else:
+        ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+        candidates = [t for t in ds["text"] if 30 < len(t.strip()) < 200 and len(t.split()) >= 6]
+        rng.shuffle(candidates)
+        sentences = candidates[:n]
+        print(f"Sampled {len(sentences)} in-distribution sentences from wikitext-103")
+        return sentences
 
 
 def make_ood(sentences, seed=42):
@@ -66,17 +75,21 @@ def analyze_one(model, tokenizer, text, layer_indices, asym_k, div_method, div_k
     ppl = compute_perplexity(model, tokenizer, text)
     ids = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)["input_ids"].to(device)
     x0 = get_embedding(model, ids).reshape(-1)
-    divs = {}
-    asyms = {}
-    for l in layer_indices:
-        fn = get_layer_output_fn(model, l)
-        if div_method == "exact":
+
+    if div_method == "hutchinson":
+        blocks = list(_get_layers(model))
+        H = _get_embed_dim(model)
+        divs, asyms = analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k)
+    else:
+        divs = {}
+        asyms = {}
+        for l in layer_indices:
+            fn = get_layer_output_fn(model, l)
             divs[l] = exact_divergence(fn, x0, chunk_size=0)
-        else:
-            divs[l] = estimate_divergence(fn, x0, n_samples=div_k)
-        asyms[l] = estimate_asymmetry(fn, x0, n_samples=asym_k)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            asyms[l] = estimate_asymmetry(fn, x0, n_samples=asym_k)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     return {"perplexity": ppl, "divergences": divs, "asymmetries": asyms}
 
 
@@ -189,6 +202,7 @@ def main():
     ap.add_argument("--div-k", type=int, default=50, help="Hutchinson samples for divergence (only used if --div-method hutchinson)")
     ap.add_argument("--asym-k", type=int, default=20, help="Samples for stochastic asymmetry (default: 20)")
     ap.add_argument("--layers", default="all", help="'all' or comma-separated indices")
+    ap.add_argument("--dataset", default="wikitext", choices=["wikitext", "openwebtext"])
     ap.add_argument("--output-dir", default="results")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -214,7 +228,7 @@ def main():
 
     # ── data ──
     print(f"\nSampling {args.n_samples} sentences from OpenWebText...")
-    in_sents = sample_openwebtext(args.n_samples, seed=args.seed)
+    in_sents = sample_sentences(args.n_samples, dataset=args.dataset, seed=args.seed)
     ood_sents = make_ood(in_sents, seed=args.seed)
 
     # ── run ──

@@ -1635,6 +1635,33 @@ timezone = ["pytz (>=2024.2)"]
 xml = ["lxml (>=5.3.0)"]
 
 [[package]]
+name = "pip"
+version = "26.0.1"
+description = "The PyPA recommended tool for installing Python packages."
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "pip-26.0.1-py3-none-any.whl", hash = "sha256:bdb1b08f4274833d62c1aa29e20907365a2ceb950410df15fc9521bad440122b"},
+    {file = "pip-26.0.1.tar.gz", hash = "sha256:c4037d8a277c89b320abe636d59f91e6d0922d08a05b60e85e53b296613346d8"},
+]
+
+[[package]]
+name = "pip-system-certs"
+version = "5.3"
+description = "Automatically configures Python to use system certificates via truststore"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pip_system_certs-5.3-py3-none-any.whl", hash = "sha256:3fbb5de62e374a99b688b1ad06e64ee5c4aeb633ef23e3a677d32e3e84fd863c"},
+    {file = "pip_system_certs-5.3.tar.gz", hash = "sha256:19c8bf9957bcce7d69c4dbc2d0b2ef13de1984d53f50a59012e6dbbad0af67c6"},
+]
+
+[package.dependencies]
+pip = ">=24.2"
+
+[[package]]
 name = "plotly"
 version = "5.24.1"
 description = "An open-source, interactive data visualization library for Python"
@@ -2862,4 +2889,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "067cb64b58ee94fede470aead8d960bd7158e328b4503549414a712cb097ff63"
+content-hash = "d3cd4196d1a1c00e0eaccd262bb716586031aa6b2fe3181c7cd081dd8f22d72a"
