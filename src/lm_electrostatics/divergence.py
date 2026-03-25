@@ -2,7 +2,16 @@ import torch
 from torch.func import jvp as func_jvp, vjp as func_vjp, vmap
 
 
-def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k):
+def _call_block(block, hidden, position_embeddings=None):
+    """Call a transformer block, passing position_embeddings for RoPE models."""
+    if position_embeddings is not None:
+        out = block(hidden, position_embeddings=position_embeddings)
+    else:
+        out = block(hidden)
+    return out if isinstance(out, torch.Tensor) else out[0]
+
+
+def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k, position_embeddings=None):
     """
     Compute Hutchinson divergence and asymmetry at multiple layers efficiently.
 
@@ -17,6 +26,7 @@ def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k):
         layer_indices: list of layer indices to measure (must be sorted)
         div_k: number of Hutchinson samples for divergence
         asym_k: number of random vectors for asymmetry
+        position_embeddings: (cos, sin) tuple for RoPE models, or None for GPT-2
 
     Returns:
         (divs, asyms): dicts mapping layer_idx -> float
@@ -37,15 +47,15 @@ def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k):
 
     for i in range(max_layer + 1):
         block = blocks[i]
+        pos_emb = position_embeddings  # capture for closure
 
-        def _make_block_fn(b):
+        def _make_block_fn(b, pe=pos_emb):
             def block_fn(h):
-                out = b(h)
-                return out if isinstance(out, torch.Tensor) else out[0]
+                return _call_block(b, h, pe)
             return block_fn
 
         block_fn = _make_block_fn(block)
-        h_in = hidden  # capture current hidden for JVP
+        h_in = hidden
 
         def _single_jvp(t, _h=h_in, _fn=block_fn):
             _, jv = func_jvp(_fn, (_h,), (t,))
@@ -75,12 +85,11 @@ def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k):
     for l in layer_indices:
         JV_l = jv_at_layer[l][:asym_k]
 
-        def _make_layer_fn(layer_idx):
+        def _make_layer_fn(layer_idx, pe=position_embeddings):
             def fn(x0_flat):
                 h = x0_flat.view(1, S, H)
                 for j in range(layer_idx + 1):
-                    out = blocks[j](h)
-                    h = out if isinstance(out, torch.Tensor) else out[0]
+                    h = _call_block(blocks[j], h, pe)
                 return h.squeeze(0).reshape(-1)
             return fn
 

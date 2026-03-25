@@ -71,6 +71,20 @@ def _get_num_layers(model):
     return len(_get_layers(model))
 
 
+def _get_position_embeddings(model, seq_len):
+    """Compute RoPE position embeddings (cos, sin) if the model uses them. Returns None for GPT-2."""
+    backbone = _get_transformer_backbone(model)
+    if not hasattr(backbone, "rotary_emb"):
+        return None
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+    # rotary_emb expects (hidden_states, position_ids) but only uses hidden_states for device/dtype
+    dummy = torch.empty(1, seq_len, 1, device=device, dtype=dtype)
+    cos, sin = backbone.rotary_emb(dummy, position_ids)
+    return (cos, sin)
+
+
 def get_embedding(model, input_ids):
     """
     Compute X_0 = embedding(input_ids).
@@ -103,6 +117,15 @@ def get_embedding(model, input_ids):
     return x0
 
 
+def _call_block(block, hidden, position_embeddings=None):
+    """Call a transformer block, passing position_embeddings if available (RoPE models)."""
+    if position_embeddings is not None:
+        outputs = block(hidden, position_embeddings=position_embeddings)
+    else:
+        outputs = block(hidden)
+    return outputs if isinstance(outputs, torch.Tensor) else outputs[0]
+
+
 def get_layer_output_fn(model, layer_idx):
     """
     Return a function f(x0_flat) -> x_l_flat that maps flattened X_0 to flattened X_l.
@@ -123,14 +146,10 @@ def get_layer_output_fn(model, layer_idx):
     def fn(x0_flat):
         S = x0_flat.shape[0] // H
         hidden = x0_flat.view(1, S, H)
+        pos_emb = _get_position_embeddings(model, S)
 
         for i in range(layer_idx + 1):
-            block = layers[i]
-            outputs = block(hidden)
-            if isinstance(outputs, torch.Tensor):
-                hidden = outputs
-            else:
-                hidden = outputs[0]
+            hidden = _call_block(layers[i], hidden, pos_emb)
 
         return hidden.squeeze(0).reshape(-1)
 
