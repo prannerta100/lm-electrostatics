@@ -21,6 +21,7 @@ from tqdm import tqdm
 from lm_electrostatics.equations import (
     load_model, get_embedding, get_layer_output_fn,
     compute_perplexity, _get_embed_dim, _get_num_layers, _get_layers,
+    _get_position_embeddings,
 )
 from lm_electrostatics.divergence import exact_divergence, estimate_divergence, estimate_asymmetry, analyze_layers_hutchinson
 
@@ -79,7 +80,9 @@ def analyze_one(model, tokenizer, text, layer_indices, asym_k, div_method, div_k
     if div_method == "hutchinson":
         blocks = list(_get_layers(model))
         H = _get_embed_dim(model)
-        divs, asyms = analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k)
+        S = ids.shape[1]
+        pos_emb = _get_position_embeddings(model, S)
+        divs, asyms = analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k, position_embeddings=pos_emb)
     else:
         divs = {}
         asyms = {}
