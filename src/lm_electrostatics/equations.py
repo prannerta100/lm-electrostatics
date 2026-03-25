@@ -98,7 +98,7 @@ def get_embedding(model, input_ids):
     else:
         raise ValueError(f"Cannot find embedding layers in {type(backbone).__name__}")
 
-    x0 = x0.squeeze(0).detach().clone().float()
+    x0 = x0.squeeze(0).detach().clone()
     x0.requires_grad_(True)
     return x0
 

@@ -21,7 +21,6 @@ def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k):
     Returns:
         (divs, asyms): dicts mapping layer_idx -> float
     """
-    x0 = x0.float()
     d = x0.shape[0]
     S = d // H
     max_layer = max(layer_indices)
@@ -123,7 +122,6 @@ def exact_divergence(fn, x, chunk_size=0):
     Returns:
         float: Exact divergence
     """
-    x = x.float()
     d = x.shape[0]
 
     def _diag_jvp(e_i):
@@ -166,7 +164,6 @@ def estimate_divergence(fn, x, n_samples=50):
     Returns:
         float: Estimated divergence
     """
-    x = x.float()
     d = x.shape[0]
     V = torch.randint(0, 2, (n_samples, d), dtype=x.dtype, device=x.device) * 2 - 1
 
@@ -195,7 +192,6 @@ def estimate_asymmetry(fn, x, n_samples=50):
     Returns:
         float: Asymmetry in [0, 2]. 0 = perfectly symmetric (conservative), 2 = purely antisymmetric.
     """
-    x = x.float()
     d = x.shape[0]
     eps = 1e-8
     V = torch.randint(0, 2, (n_samples, d), dtype=x.dtype, device=x.device) * 2 - 1
