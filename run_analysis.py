@@ -186,13 +186,31 @@ def main():
     ap.add_argument("--dataset", default="wikitext", choices=["wikitext", "openwebtext"])
     ap.add_argument("--output-dir", default="results")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--random-init", action="store_true", help="Use randomly initialized weights (no pretrained)")
     args = ap.parse_args()
 
     dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
     dtype = dtype_map[args.dtype] if args.dtype else None
 
-    print(f"Loading {args.model}...")
-    model, tokenizer = load_model(args.model, dtype=dtype)
+    if args.random_init:
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+        print(f"Loading {args.model} with RANDOM weights...")
+        config = AutoConfig.from_pretrained(args.model)
+        config.attn_implementation = "eager"
+        if dtype is not None:
+            config.torch_dtype = dtype
+        model = AutoModelForCausalLM.from_config(config)
+        if dtype is not None:
+            model = model.to(dtype)
+        model.eval()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        for param in model.parameters():
+            param.requires_grad = False
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+    else:
+        print(f"Loading {args.model}...")
+        model, tokenizer = load_model(args.model, dtype=dtype)
     num_layers = _get_num_layers(model)
     if args.layers == "all":
         layer_indices = list(range(num_layers))
