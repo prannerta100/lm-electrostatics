@@ -197,9 +197,7 @@ def main():
         print(f"Loading {args.model} with RANDOM weights...")
         config = AutoConfig.from_pretrained(args.model)
         config._attn_implementation = "eager"
-        if dtype is not None:
-            config.torch_dtype = dtype
-        model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
+        model = AutoModelForCausalLM.from_config(config, attn_implementation="eager", dtype=dtype)
         if dtype is not None:
             model = model.to(dtype)
         model.eval()
