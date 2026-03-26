@@ -196,10 +196,10 @@ def main():
         from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
         print(f"Loading {args.model} with RANDOM weights...")
         config = AutoConfig.from_pretrained(args.model)
-        config.attn_implementation = "eager"
+        config._attn_implementation = "eager"
         if dtype is not None:
             config.torch_dtype = dtype
-        model = AutoModelForCausalLM.from_config(config)
+        model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
         if dtype is not None:
             model = model.to(dtype)
         model.eval()
