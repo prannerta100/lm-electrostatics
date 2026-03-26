@@ -125,6 +125,103 @@ def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, cons_k, posit
     return divs, cons_ratios
 
 
+def analyze_layers_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=None):
+    """
+    Per-layer divergence and conservativeness: measures ∂f_l/∂x_{l-1} (single block Jacobian).
+
+    For each layer l, computes:
+      - Divergence: Tr(J_l) where J_l = ∂f_l/∂x_{l-1}
+      - Conservative ratio: ||S_l||²_F / ||J_l||²_F where S_l = (J_l + J_lᵀ)/2
+
+    This is different from the composed Jacobian ∂x_l/∂x_0. The composed Jacobian
+    is always ~0.5 conservativeness due to matrix multiplication destroying symmetry.
+    Per-layer Jacobians can reveal whether individual transformer blocks act as
+    gradient fields.
+
+    Args:
+        blocks: list of transformer block modules
+        H: hidden dimension
+        x0: flattened embedding tensor (d,)
+        layer_indices: list of layer indices to measure
+        div_k: number of Rademacher vectors for Hutchinson divergence
+        cons_k: number of basis columns to sample for conservative ratio
+        position_embeddings: (cos, sin) for RoPE models, or None for GPT-2
+
+    Returns:
+        (divs, cons_ratios): dicts mapping layer_idx -> float
+    """
+    d = x0.shape[0]
+    S = d // H
+    max_layer = max(layer_indices)
+    layer_set = set(layer_indices)
+
+    # Forward pass to get hidden states at each layer
+    hidden = x0.view(1, S, H)
+    hidden_at_layer = {-1: hidden}  # input to layer 0
+
+    for i in range(max_layer + 1):
+        block = blocks[i]
+        hidden = _call_block(block, hidden, position_embeddings)
+        if i in layer_set or (i + 1) in layer_set:
+            hidden_at_layer[i] = hidden
+
+    # For each target layer, do JVP of that single block
+    divs = {}
+    cons_ratios = {}
+    eps = 1e-8
+
+    for l in layer_indices:
+        h_in = hidden_at_layer[l - 1]  # input to block l
+        h_in_flat = h_in.reshape(-1)
+
+        block = blocks[l]
+        pos_emb = position_embeddings
+
+        def _make_block_fn(b, pe=pos_emb):
+            def block_fn(h):
+                return _call_block(b, h, pe)
+            return block_fn
+
+        block_fn = _make_block_fn(block)
+
+        # Build tangent vectors for this layer
+        V_rand = torch.randint(0, 2, (div_k, d), dtype=x0.dtype, device=x0.device) * 2 - 1
+        col_indices = torch.randperm(d, device=x0.device)[:cons_k]
+        E_basis = torch.zeros(cons_k, d, dtype=x0.dtype, device=x0.device)
+        E_basis[torch.arange(cons_k, device=x0.device), col_indices] = 1.0
+
+        K = div_k + cons_k
+        V_all = torch.cat([V_rand, E_basis], dim=0).view(K, 1, S, H)
+
+        # Single-block JVP for all tangent vectors
+        def _single_jvp(t, _h=h_in, _fn=block_fn):
+            _, jv = func_jvp(_fn, (_h,), (t,))
+            return jv
+
+        JV_all = vmap(_single_jvp)(V_all).reshape(K, d)
+
+        # Divergence: Tr(J_l) ≈ (1/K) Σ vᵀ(J_l v)
+        JV_rand = JV_all[:div_k]
+        traces = (V_rand * JV_rand).sum(dim=1)
+        divs[l] = traces.mean().item()
+
+        # Conservative ratio via column sampling
+        JV_basis = JV_all[div_k:]  # (cons_k, d)
+        j = col_indices
+        M = JV_basis[:, j]  # (cons_k, cons_k), M[a,b] = J_{j[b], j[a]}
+        idx = torch.triu_indices(cons_k, cons_k, offset=1, device=x0.device)
+        J_ab = M[idx[1], idx[0]]
+        J_ba = M[idx[0], idx[1]]
+        S_sq = ((J_ab + J_ba) ** 2).sum()
+        Omega_sq = ((J_ab - J_ba) ** 2).sum()
+        cons_ratios[l] = (S_sq / (S_sq + Omega_sq + eps)).item()
+
+        if x0.is_cuda:
+            torch.cuda.empty_cache()
+
+    return divs, cons_ratios
+
+
 def exact_divergence(fn, x, chunk_size=0):
     """
     Exact divergence: div(F) = Tr(J) = Σᵢ ∂Fᵢ/∂xᵢ.

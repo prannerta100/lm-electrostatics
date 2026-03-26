@@ -1,23 +1,17 @@
 #!/usr/bin/env python
 """
-Per-layer Jacobian analysis: divergence and conservativeness of individual
-transformer blocks ∂f_l/∂x_{l-1}.
-
-Unlike the composed Jacobian ∂x_l/∂x_0, per-layer Jacobians can reveal
-whether individual blocks act as gradient fields (conservative) or have
-rotational structure.
+Large-scale divergence + asymmetry analysis on OpenWebText.
 
 Usage:
   python run_analysis.py --n-samples 10           # CPU test
-  python run_analysis.py --n-samples 1000 --model Qwen/Qwen2.5-14B --dtype bfloat16 \
-    --div-method hutchinson --div-k 50 --cons-k 50 \
-    --layers 0,4,8,12,16,20,24,28,32,36,40,44,47
+  python run_analysis.py --n-samples 100000       # GPU production run
 """
 
 import argparse
 import json
 import os
 import random
+import time
 
 import torch
 import plotly.graph_objects as go
@@ -25,11 +19,11 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from lm_electrostatics.equations import (
-    load_model, get_embedding,
+    load_model, get_embedding, get_layer_output_fn,
     compute_perplexity, _get_embed_dim, _get_num_layers, _get_layers,
-    _get_position_embeddings, _call_block,
+    _get_position_embeddings,
 )
-from lm_electrostatics.divergence import analyze_layers_perlayer, exact_divergence
+from lm_electrostatics.divergence import exact_divergence, estimate_divergence, analyze_layers_hutchinson
 
 
 # ── data ──────────────────────────────────────────────────────
@@ -83,39 +77,19 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
     ids = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)["input_ids"].to(device)
     x0 = get_embedding(model, ids).reshape(-1)
 
-    blocks = list(_get_layers(model))
-    H = _get_embed_dim(model)
-    S = ids.shape[1]
-    pos_emb = _get_position_embeddings(model, S)
-
     if div_method == "hutchinson":
-        divs, cons_ratios = analyze_layers_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
+        blocks = list(_get_layers(model))
+        H = _get_embed_dim(model)
+        S = ids.shape[1]
+        pos_emb = _get_position_embeddings(model, S)
+        divs, cons_ratios = analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
     else:
-        # Exact: full single-block Jacobian per layer
-        from torch.func import jacfwd
-        hidden = x0.view(1, S, H)
         divs = {}
         cons_ratios = {}
-        eps = 1e-8
         for l in layer_indices:
-            # Forward pass to get input to this layer
-            h = x0.view(1, S, H)
-            for i in range(l):
-                h = _call_block(blocks[i], h, pos_emb)
-            h_in = h
-
-            def block_fn(h_flat, _b=blocks[l], _pe=pos_emb):
-                return _call_block(_b, h_flat.view(1, S, H), _pe).reshape(-1)
-
-            h_flat = h_in.reshape(-1)
-            J = jacfwd(block_fn)(h_flat)  # (d, d)
-            divs[l] = torch.trace(J).item()
-            Sym = (J + J.T) / 2
-            Asym = (J - J.T) / 2
-            S_sq = (Sym ** 2).sum().item()
-            O_sq = (Asym ** 2).sum().item()
-            cons_ratios[l] = S_sq / (S_sq + O_sq + eps)
-
+            fn = get_layer_output_fn(model, l)
+            divs[l] = exact_divergence(fn, x0, chunk_size=0)
+            cons_ratios[l] = 0.0  # exact conservativeness not implemented
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -125,7 +99,7 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
 # ── plots ─────────────────────────────────────────────────────
 
 def plot_violin_div_vs_layer(results, layer_indices, out_dir):
-    """Violin: per-layer divergence distribution, blue=in / red=out."""
+    """Violin: divergence distribution per layer, blue=in / red=out."""
     fig = go.Figure()
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
@@ -140,17 +114,17 @@ def plot_violin_div_vs_layer(results, layer_indices, out_dir):
                 meanline_visible=True,
             ))
     fig.update_layout(
-        title="Per-Layer Divergence Tr(∂f_l/∂x_{l-1})",
-        xaxis_title="Layer", yaxis_title="Divergence Tr(J_l)",
+        title="Exact Divergence Tr(J) per Layer",
+        xaxis_title="Layer", yaxis_title="Divergence Tr(J)",
         violinmode="overlay", hovermode="closest",
     )
-    path = os.path.join(out_dir, "perlayer_divergence_violin.html")
+    path = os.path.join(out_dir, "divergence_vs_layer_violin.html")
     fig.write_html(path)
     print(f"Saved {path}")
 
 
 def plot_conservativeness_vs_layer(results, layer_indices, out_dir):
-    """Violin: per-layer conservative ratio, blue=in / red=out."""
+    """Violin: conservative ratio per layer, blue=in / red=out."""
     fig = go.Figure()
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
@@ -165,11 +139,11 @@ def plot_conservativeness_vs_layer(results, layer_indices, out_dir):
                 meanline_visible=True,
             ))
     fig.update_layout(
-        title="Per-Layer Conservativeness ||S_l||²/||J_l||² (1=conservative, 0.5=random, 0=rotational)",
-        xaxis_title="Layer", yaxis_title="||S_l||²_F / ||J_l||²_F",
+        title="Conservative Ratio per Layer (1=conservative, 0.5=random, 0=rotational)",
+        xaxis_title="Layer", yaxis_title="||S||²_F / ||J||²_F",
         violinmode="overlay", hovermode="closest",
     )
-    path = os.path.join(out_dir, "perlayer_conservativeness_violin.html")
+    path = os.path.join(out_dir, "conservativeness_vs_layer_violin.html")
     fig.write_html(path)
     print(f"Saved {path}")
 
@@ -188,11 +162,11 @@ def plot_div_vs_ppl(results, layer_indices, out_dir):
             hovertext=[r["text"][:80] for r in group], hoverinfo="text+x+y",
         ))
     fig.update_layout(
-        title=f"Per-Layer Divergence (Layer {last_layer}) vs Perplexity",
-        xaxis_title="Perplexity", yaxis_title=f"Divergence Tr(J_{last_layer})",
+        title=f"Divergence (Layer {last_layer}) vs Perplexity",
+        xaxis_title="Perplexity", yaxis_title=f"Divergence Tr(J) [Layer {last_layer}]",
         hovermode="closest",
     )
-    path = os.path.join(out_dir, "perlayer_divergence_vs_perplexity.html")
+    path = os.path.join(out_dir, "divergence_vs_perplexity.html")
     fig.write_html(path)
     print(f"Saved {path}")
 
@@ -204,10 +178,10 @@ def main():
     ap.add_argument("--n-samples", type=int, default=10)
     ap.add_argument("--model", default="gpt2")
     ap.add_argument("--dtype", default=None, choices=["float32", "bfloat16", "float16"])
-    ap.add_argument("--div-method", default="hutchinson", choices=["exact", "hutchinson"],
-                    help="'exact' (full Jacobian) or 'hutchinson' (stochastic)")
+    ap.add_argument("--div-method", default="exact", choices=["exact", "hutchinson"],
+                    help="Divergence method: 'exact' (full Jacobian) or 'hutchinson' (stochastic)")
     ap.add_argument("--div-k", type=int, default=50, help="Hutchinson samples for divergence (only used if --div-method hutchinson)")
-    ap.add_argument("--cons-k", type=int, default=50, help="Basis columns for conservative ratio (exact: full Jacobian used instead)")
+    ap.add_argument("--cons-k", type=int, default=50, help="Basis columns to sample for conservative ratio (default: 50)")
     ap.add_argument("--layers", default="all", help="'all' or comma-separated indices")
     ap.add_argument("--dataset", default="wikitext", choices=["wikitext", "openwebtext"])
     ap.add_argument("--output-dir", default="results")
@@ -242,14 +216,15 @@ def main():
         layer_indices = [int(x) for x in args.layers.split(",")]
     print(f"Layers: {layer_indices}")
     if args.div_method == "exact":
-        print(f"Per-layer Jacobian: EXACT (full Jacobian)")
+        print(f"Divergence: EXACT (full Jacobian trace)")
     else:
-        print(f"Per-layer Jacobian: HUTCHINSON (div_k={args.div_k}, cons_k={args.cons_k})")
+        print(f"Divergence: HUTCHINSON (K={args.div_k} jvp samples)")
+    print(f"Conservativeness: column-sampled (K={args.cons_k} basis JVPs)")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_properties(0).name}")
 
     # ── data ──
-    print(f"\nSampling {args.n_samples} sentences from {args.dataset}...")
+    print(f"\nSampling {args.n_samples} sentences from OpenWebText...")
     in_sents = sample_sentences(args.n_samples, dataset=args.dataset, seed=args.seed)
     ood_sents = make_ood(in_sents, seed=args.seed)
 
