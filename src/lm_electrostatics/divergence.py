@@ -11,43 +11,60 @@ def _call_block(block, hidden, position_embeddings=None):
     return out if isinstance(out, torch.Tensor) else out[0]
 
 
-def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k, position_embeddings=None):
+def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=None):
     """
-    Compute Hutchinson divergence and asymmetry at multiple layers efficiently.
+    Compute Hutchinson divergence and column-sampled conservative ratio per layer.
 
-    JVP tangent vectors are propagated incrementally block-by-block, so all
-    layers share a single forward pass instead of each layer recomputing from x0.
-    VJP (for asymmetry) still requires per-layer backward passes.
+    All computation uses forward-mode AD only (JVPs, no VJPs). One incremental
+    pass propagates tangent vectors block-by-block through all layers.
+
+    Divergence: Tr(J) ≈ (1/K) Σ vᵀ(Jv), Rademacher v.  [Hutchinson 1990]
+    Conservative ratio: ||S||²_F / ||J||²_F via column sampling.
+
+        Method: JVP with basis vector e_j gives full column j of J.
+        Sample K_cons random columns. For each pair (j_a, j_b), read off
+        J_{j_a,j_b} and J_{j_b,j_a} exactly. Then:
+            S_{ab} = (J_{j_a,j_b} + J_{j_b,j_a}) / 2   (symmetric part)
+            Ω_{ab} = (J_{j_a,j_b} - J_{j_b,j_a}) / 2   (antisymmetric part)
+            cons_ratio = Σ S²_{ab} / (Σ S²_{ab} + Σ Ω²_{ab})
+        Range: 1.0 = conservative, 0.5 = random, 0.0 = purely rotational.
+        Convergence: O(1/K_cons), independent of d.
 
     Args:
         blocks: list of transformer block modules
         H: hidden dimension
         x0: flattened embedding tensor (d,)
-        layer_indices: list of layer indices to measure (must be sorted)
-        div_k: number of Hutchinson samples for divergence
-        asym_k: number of random vectors for asymmetry
-        position_embeddings: (cos, sin) tuple for RoPE models, or None for GPT-2
+        layer_indices: list of layer indices to measure
+        div_k: number of Rademacher vectors for Hutchinson divergence
+        cons_k: number of basis columns to sample for conservative ratio
+        position_embeddings: (cos, sin) for RoPE models, or None for GPT-2
 
     Returns:
-        (divs, asyms): dicts mapping layer_idx -> float
+        (divs, cons_ratios): dicts mapping layer_idx -> float
     """
     d = x0.shape[0]
     S = d // H
     max_layer = max(layer_indices)
     layer_set = set(layer_indices)
 
-    K = max(div_k, asym_k)
-    V = torch.randint(0, 2, (K, d), dtype=x0.dtype, device=x0.device) * 2 - 1
+    # --- Build tangent vectors: div_k random + cons_k basis ---
+    V_rand = torch.randint(0, 2, (div_k, d), dtype=x0.dtype, device=x0.device) * 2 - 1
+    col_indices = torch.randperm(d, device=x0.device)[:cons_k]
+    E_basis = torch.zeros(cons_k, d, dtype=x0.dtype, device=x0.device)
+    E_basis[torch.arange(cons_k, device=x0.device), col_indices] = 1.0
 
-    # --- Incremental JVP: propagate tangents block by block ---
+    K = div_k + cons_k
+    V_all = torch.cat([V_rand, E_basis], dim=0)  # (K, d)
+
+    # --- Incremental JVP: propagate all tangents block by block ---
     hidden = x0.view(1, S, H)
-    tangents = V.view(K, 1, S, H)
+    tangents = V_all.view(K, 1, S, H)
 
     jv_at_layer = {}
 
     for i in range(max_layer + 1):
         block = blocks[i]
-        pos_emb = position_embeddings  # capture for closure
+        pos_emb = position_embeddings
 
         def _make_block_fn(b, pe=pos_emb):
             def block_fn(h):
@@ -73,42 +90,39 @@ def analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k, posit
     # --- Divergence: Tr(J) ≈ (1/K) Σ vᵀ(Jv) ---
     divs = {}
     for l in layer_indices:
-        JV = jv_at_layer[l][:div_k]
-        traces = (V[:div_k] * JV).sum(dim=1)
+        JV_rand = jv_at_layer[l][:div_k]  # (div_k, d)
+        traces = (V_rand * JV_rand).sum(dim=1)
         divs[l] = traces.mean().item()
 
-    # --- Asymmetry: need VJP per layer (no incremental shortcut) ---
-    asyms = {}
+    # --- Conservative ratio via column sampling ---
+    # JV_basis[k] = J @ e_{col_indices[k]} = column col_indices[k] of J
+    # JV_basis[k][i] = J_{i, col_indices[k]}
+    cons_ratios = {}
     eps = 1e-8
-    V_asym = V[:asym_k]
 
     for l in layer_indices:
-        JV_l = jv_at_layer[l][:asym_k]
+        JV_basis = jv_at_layer[l][div_k:]  # (cons_k, d) — each row is a column of J
 
-        def _make_layer_fn(layer_idx, pe=position_embeddings):
-            def fn(x0_flat):
-                h = x0_flat.view(1, S, H)
-                for j in range(layer_idx + 1):
-                    h = _call_block(blocks[j], h, pe)
-                return h.squeeze(0).reshape(-1)
-            return fn
+        # For each pair (a, b) of sampled columns, extract:
+        #   J_{j_a, j_b} = JV_basis[b][j_a] = column j_b, row j_a
+        #   J_{j_b, j_a} = JV_basis[a][j_b] = column j_a, row j_b
+        j = col_indices  # (cons_k,)
+        # cols[a] is the full column j_a of J, so cols[a][j_b] = J_{j_b, j_a}
+        # Build cross-entry matrix: M[a,b] = J_{j_b, j_a} = JV_basis[a][j[b]]
+        M = JV_basis[:, j]  # (cons_k, cons_k), M[a,b] = J_{j[b], j[a]}
+        # So M[a,b] = J_{j_b, j_a} and M[b,a] = J_{j_a, j_b}
+        # S_ab = (M[b,a] + M[a,b]) / 2,  Ω_ab = (M[b,a] - M[a,b]) / 2
 
-        fn_l = _make_layer_fn(l)
-        _, vjp_fn = func_vjp(fn_l, x0)
+        # Use upper triangle (a < b) to avoid double-counting
+        idx = torch.triu_indices(cons_k, cons_k, offset=1, device=x0.device)
+        J_ab = M[idx[1], idx[0]]  # J_{j_a, j_b} = M[b, a]
+        J_ba = M[idx[0], idx[1]]  # J_{j_b, j_a} = M[a, b]
 
-        def _vjp_one(v, _vjp_fn=vjp_fn):
-            return _vjp_fn(v)[0]
+        S_sq = ((J_ab + J_ba) ** 2).sum()
+        Omega_sq = ((J_ab - J_ba) ** 2).sum()
+        cons_ratios[l] = (S_sq / (S_sq + Omega_sq + eps)).item()
 
-        JtV = vmap(_vjp_one)(V_asym)
-
-        diff_sq = ((JV_l - JtV) ** 2).sum(dim=1)
-        norm_sq = (JV_l ** 2).sum(dim=1) + (JtV ** 2).sum(dim=1) + eps
-        asyms[l] = (diff_sq / norm_sq).mean().item()
-
-        if x0.is_cuda:
-            torch.cuda.empty_cache()
-
-    return divs, asyms
+    return divs, cons_ratios
 
 
 def exact_divergence(fn, x, chunk_size=0):

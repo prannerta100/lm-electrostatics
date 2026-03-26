@@ -23,7 +23,7 @@ from lm_electrostatics.equations import (
     compute_perplexity, _get_embed_dim, _get_num_layers, _get_layers,
     _get_position_embeddings,
 )
-from lm_electrostatics.divergence import exact_divergence, estimate_divergence, estimate_asymmetry, analyze_layers_hutchinson
+from lm_electrostatics.divergence import exact_divergence, estimate_divergence, analyze_layers_hutchinson
 
 
 # ── data ──────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ def make_ood(sentences, seed=42):
 
 # ── analysis ──────────────────────────────────────────────────
 
-def analyze_one(model, tokenizer, text, layer_indices, asym_k, div_method, div_k):
+def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k):
     device = next(model.parameters()).device
     ppl = compute_perplexity(model, tokenizer, text)
     ids = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)["input_ids"].to(device)
@@ -82,18 +82,18 @@ def analyze_one(model, tokenizer, text, layer_indices, asym_k, div_method, div_k
         H = _get_embed_dim(model)
         S = ids.shape[1]
         pos_emb = _get_position_embeddings(model, S)
-        divs, asyms = analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, asym_k, position_embeddings=pos_emb)
+        divs, cons_ratios = analyze_layers_hutchinson(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
     else:
         divs = {}
-        asyms = {}
+        cons_ratios = {}
         for l in layer_indices:
             fn = get_layer_output_fn(model, l)
             divs[l] = exact_divergence(fn, x0, chunk_size=0)
-            asyms[l] = estimate_asymmetry(fn, x0, n_samples=asym_k)
+            cons_ratios[l] = 0.0  # exact conservativeness not implemented
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    return {"perplexity": ppl, "divergences": divs, "asymmetries": asyms}
+    return {"perplexity": ppl, "divergences": divs, "conservativeness": cons_ratios}
 
 
 # ── plots ─────────────────────────────────────────────────────
@@ -123,35 +123,13 @@ def plot_violin_div_vs_layer(results, layer_indices, out_dir):
     print(f"Saved {path}")
 
 
-def plot_asymmetry_histogram(results, layer_indices, out_dir):
-    """Histogram: Frobenius asymmetry (avg across layers) for in vs out."""
-    fig = go.Figure()
-    for label, color in [("in", "blue"), ("out", "red")]:
-        group = [r for r in results if r["label"] == label]
-        avg_asyms = [sum(r["asymmetries"].values()) / len(r["asymmetries"]) for r in group]
-        fig.add_trace(go.Histogram(
-            x=avg_asyms, name=f"{label}-dist",
-            marker_color=color, opacity=0.6,
-            nbinsx=50,
-        ))
-    fig.update_layout(
-        title="Jacobian Asymmetry Distribution (stochastic, avg over layers)",
-        xaxis_title="Asymmetry (0=conservative, 2=antisymmetric)",
-        yaxis_title="Count",
-        barmode="overlay", hovermode="closest",
-    )
-    path = os.path.join(out_dir, "asymmetry_histogram.html")
-    fig.write_html(path)
-    print(f"Saved {path}")
-
-
-def plot_violin_asym_vs_layer(results, layer_indices, out_dir):
-    """Violin: asymmetry distribution per layer, blue=in / red=out."""
+def plot_conservativeness_vs_layer(results, layer_indices, out_dir):
+    """Violin: conservative ratio per layer, blue=in / red=out."""
     fig = go.Figure()
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
         for l in layer_indices:
-            vals = [r["asymmetries"][l] for r in group]
+            vals = [r["conservativeness"][l] for r in group]
             fig.add_trace(go.Violin(
                 x=[f"L{l}"] * len(vals), y=vals,
                 legendgroup=label, scalegroup=label,
@@ -161,11 +139,11 @@ def plot_violin_asym_vs_layer(results, layer_indices, out_dir):
                 meanline_visible=True,
             ))
     fig.update_layout(
-        title="Jacobian Asymmetry per Layer",
-        xaxis_title="Layer", yaxis_title="Asymmetry (0=conservative, 2=antisymmetric)",
+        title="Conservative Ratio per Layer (1=conservative, 0.5=random, 0=rotational)",
+        xaxis_title="Layer", yaxis_title="||S||²_F / ||J||²_F",
         violinmode="overlay", hovermode="closest",
     )
-    path = os.path.join(out_dir, "asymmetry_vs_layer_violin.html")
+    path = os.path.join(out_dir, "conservativeness_vs_layer_violin.html")
     fig.write_html(path)
     print(f"Saved {path}")
 
@@ -203,7 +181,7 @@ def main():
     ap.add_argument("--div-method", default="exact", choices=["exact", "hutchinson"],
                     help="Divergence method: 'exact' (full Jacobian) or 'hutchinson' (stochastic)")
     ap.add_argument("--div-k", type=int, default=50, help="Hutchinson samples for divergence (only used if --div-method hutchinson)")
-    ap.add_argument("--asym-k", type=int, default=20, help="Samples for stochastic asymmetry (default: 20)")
+    ap.add_argument("--cons-k", type=int, default=50, help="Basis columns to sample for conservative ratio (default: 50)")
     ap.add_argument("--layers", default="all", help="'all' or comma-separated indices")
     ap.add_argument("--dataset", default="wikitext", choices=["wikitext", "openwebtext"])
     ap.add_argument("--output-dir", default="results")
@@ -225,7 +203,7 @@ def main():
         print(f"Divergence: EXACT (full Jacobian trace)")
     else:
         print(f"Divergence: HUTCHINSON (K={args.div_k} jvp samples)")
-    print(f"Asymmetry: stochastic (K={args.asym_k} jvp+vjp pairs)")
+    print(f"Conservativeness: column-sampled (K={args.cons_k} basis JVPs)")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_properties(0).name}")
 
@@ -245,17 +223,17 @@ def main():
 
     for idx, (text, label) in enumerate(pbar):
         try:
-            r = analyze_one(model, tokenizer, text, layer_indices, args.asym_k, args.div_method, args.div_k)
+            r = analyze_one(model, tokenizer, text, layer_indices, args.cons_k, args.div_method, args.div_k)
         except Exception as e:
             tqdm.write(f"  SKIP [{idx+1}]: {e}")
             continue
         r["text"] = text
         r["label"] = label
         r["divergences"] = {str(k): v for k, v in r["divergences"].items()}
-        r["asymmetries"] = {str(k): v for k, v in r["asymmetries"].items()}
+        r["conservativeness"] = {str(k): v for k, v in r["conservativeness"].items()}
         results.append(r)
-        avg_asym = sum(float(v) for v in r["asymmetries"].values()) / len(r["asymmetries"])
-        pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", asym=f"{avg_asym:.3f}")
+        avg_cons = sum(float(v) for v in r["conservativeness"].values()) / len(r["conservativeness"])
+        pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", cons=f"{avg_cons:.3f}")
 
         if (idx + 1) % max(1, total // 20) == 0:
             with open(checkpoint_path, "w") as f:
@@ -270,12 +248,11 @@ def main():
     # Convert str keys back to int for plotting
     for r in results:
         r["divergences"] = {int(k): v for k, v in r["divergences"].items()}
-        r["asymmetries"] = {int(k): v for k, v in r["asymmetries"].items()}
+        r["conservativeness"] = {int(k): v for k, v in r["conservativeness"].items()}
 
     # ── plots ──
     plot_violin_div_vs_layer(results, layer_indices, args.output_dir)
-    plot_violin_asym_vs_layer(results, layer_indices, args.output_dir)
-    plot_asymmetry_histogram(results, layer_indices, args.output_dir)
+    plot_conservativeness_vs_layer(results, layer_indices, args.output_dir)
     plot_div_vs_ppl(results, layer_indices, args.output_dir)
 
     print(f"Done in {pbar.format_dict['elapsed']:.0f}s")
