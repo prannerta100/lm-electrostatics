@@ -14,15 +14,20 @@ SEED=42
 
 # Model configurations: "model_name|dtype|output_suffix|layers"
 # Adjust layer sampling based on model depth
+# MODELS=(
+#     "gpt2|float32|gpt2|0,2,4,6,8,10,11"
+#     "gpt2-xl|float32|gpt2-xl|0,6,12,18,24,30,36,42,47"
+#     "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,4,8,12,16,20,24,28,32,36,40,43"
+#     "Qwen/Qwen2.5-7B|bfloat16|qwen25-7b|0,4,8,12,16,20,24,27"
+#     "Qwen/Qwen2.5-14B|bfloat16|qwen25-14b|0,4,8,12,16,20,24,28,32,36,40,44,47"
+#     "Qwen/Qwen2.5-7B-Instruct|bfloat16|qwen25-7b-instruct|0,4,8,12,16,20,24,27"
+#     "Qwen/Qwen2.5-14B-Instruct|bfloat16|qwen25-14b-instruct|0,4,8,12,16,20,24,28,32,36,40,44,47"
+#     "meta-llama/Llama-3.2-3B|bfloat16|llama32-3b|0,4,8,12,16,20,24,27"
+#     "meta-llama/Llama-3.2-3B-Instruct|bfloat16|llama32-3b-instruct|0,4,8,12,16,20,24,27"
+# )
+
 MODELS=(
-    "gpt2|float32|gpt2|0,2,4,6,8,10,11"
-    "gpt2-xl|float32|gpt2-xl|0,6,12,18,24,30,36,42,47"
-    "Qwen/Qwen2.5-7B|bfloat16|qwen25-7b|0,4,8,12,16,20,24,27"
-    "Qwen/Qwen2.5-14B|bfloat16|qwen25-14b|0,4,8,12,16,20,24,28,32,36,40,44,47"
-    "Qwen/Qwen2.5-7B-Instruct|bfloat16|qwen25-7b-instruct|0,4,8,12,16,20,24,27"
-    "Qwen/Qwen2.5-14B-Instruct|bfloat16|qwen25-14b-instruct|0,4,8,12,16,20,24,28,32,36,40,44,47"
-    "meta-llama/Llama-3.2-3B|bfloat16|llama32-3b|0,4,8,12,16,20,24,27"
-    "meta-llama/Llama-3.2-3B-Instruct|bfloat16|llama32-3b-instruct|0,4,8,12,16,20,24,27"
+    "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,4,8,12,16,20,24,28,32,36,40,43"
 )
 
 echo "Starting batch analysis for ${#MODELS[@]} model configurations"
