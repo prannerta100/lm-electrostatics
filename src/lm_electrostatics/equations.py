@@ -39,6 +39,9 @@ def _get_transformer_backbone(model):
     # GPT-2 style
     if hasattr(model, "transformer"):
         return model.transformer
+    # GPT-NeoX / Pythia style
+    if hasattr(model, "gpt_neox"):
+        return model.gpt_neox
     # LLaMA / Mistral / Qwen style
     if hasattr(model, "model"):
         return model.model
@@ -106,6 +109,9 @@ def get_embedding(model, input_ids):
         # GPT-2 style: token embedding + position embedding
         positions = torch.arange(S, device=device)
         x0 = backbone.wte(input_ids) + backbone.wpe(positions)
+    elif hasattr(backbone, "embed_in"):
+        # GPT-NeoX / Pythia style
+        x0 = backbone.embed_in(input_ids)
     elif hasattr(backbone, "embed_tokens"):
         # LLaMA / Mistral / Qwen style
         x0 = backbone.embed_tokens(input_ids)

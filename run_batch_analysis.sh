@@ -14,21 +14,22 @@ SEED=42
 
 # Model configurations: "model_name|dtype|output_suffix|layers"
 # Adjust layer sampling based on model depth
-# MODELS=(
-#     "gpt2|float32|gpt2|0,2,4,6,8,10,11"
-#     "gpt2-xl|float32|gpt2-xl|0,6,12,18,24,30,36,42,47"
-#     "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,4,8,12,16,20,24,28,32,36,40,43"
-#     "Qwen/Qwen2.5-7B|bfloat16|qwen25-7b|0,4,8,12,16,20,24,27"
-#     "Qwen/Qwen2.5-14B|bfloat16|qwen25-14b|0,4,8,12,16,20,24,28,32,36,40,44,47"
-#     "Qwen/Qwen2.5-7B-Instruct|bfloat16|qwen25-7b-instruct|0,4,8,12,16,20,24,27"
-#     "Qwen/Qwen2.5-14B-Instruct|bfloat16|qwen25-14b-instruct|0,4,8,12,16,20,24,28,32,36,40,44,47"
-#     "meta-llama/Llama-3.2-3B|bfloat16|llama32-3b|0,4,8,12,16,20,24,27"
-#     "meta-llama/Llama-3.2-3B-Instruct|bfloat16|llama32-3b-instruct|0,4,8,12,16,20,24,27"
-# )
-
 MODELS=(
-    "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,4,8,12,16,20,24,28,32,36,40,43"
+    "gpt2|float32|gpt2|0,2,4,6,8,10,11"
+    "gpt2-xl|float32|gpt2-xl|0,6,12,18,24,30,36,42,47"
+    "Qwen/Qwen2.5-7B|bfloat16|qwen25-7b|0,4,8,12,16,20,24,27"
+    "Qwen/Qwen2.5-14B|bfloat16|qwen25-14b|0,4,8,12,16,20,24,28,32,36,40,44,47"
+    "Qwen/Qwen2.5-7B-Instruct|bfloat16|qwen25-7b-instruct|0,4,8,12,16,20,24,27"
+    "Qwen/Qwen2.5-14B-Instruct|bfloat16|qwen25-14b-instruct|0,4,8,12,16,20,24,28,32,36,40,44,47"
+    "mistralai/Mistral-7B-v0.1|bfloat16|mistral-7b|0,4,8,12,16,20,24,28,31"
+    "meta-llama/Llama-3.2-3B|bfloat16|llama32-3b|0,4,8,12,16,20,24,27"
+    "meta-llama/Llama-3.2-3B-Instruct|bfloat16|llama32-3b-instruct|0,4,8,12,16,20,24,27"
 )
+
+# Failed models (architecture or dtype issues):
+# "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,4,8,12,16,20,24,28,32,36,40,43"  # list index out of range
+# "microsoft/phi-2|bfloat16|phi-2|0,4,8,12,16,20,24,28,31"  # dtype mismatch
+# "EleutherAI/pythia-12b|bfloat16|pythia-12b|0,4,8,12,16,20,24,28,32,35"  # dtype mismatch
 
 echo "Starting batch analysis for ${#MODELS[@]} model configurations"
 echo "=================================================="
