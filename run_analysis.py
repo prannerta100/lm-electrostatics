@@ -96,10 +96,9 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
             attn_divs_perlayer, attn_cons_perlayer = analyze_attention_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
             attn_divs_composed, attn_cons_composed = analyze_attention_composed(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
         except Exception as attn_err:
-            # If attention analysis fails (unsupported architecture), return zeros
-            import traceback
-            tqdm.write(f"  ATTN_WARN: {attn_err}")
-            traceback.print_exc()
+            if not getattr(analyze_one, '_attn_warned', False):
+                tqdm.write(f"  ATTN_WARN: {attn_err}")
+                analyze_one._attn_warned = True
             attn_divs_perlayer = {l: 0.0 for l in layer_indices}
             attn_cons_perlayer = {l: 0.0 for l in layer_indices}
             attn_divs_composed = {l: 0.0 for l in layer_indices}

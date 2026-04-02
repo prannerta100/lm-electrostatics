@@ -24,6 +24,10 @@ def _call_attention_sublayer(block, hidden, position_embeddings=None):
         # GPT-2 style
         ln = block.ln_1
         attn = block.attn
+    elif hasattr(block, 'attention') and hasattr(block, 'input_layernorm'):
+        # GPT-NeoX / Pythia style
+        ln = block.input_layernorm
+        attn = block.attention
     elif hasattr(block, 'self_attn') and hasattr(block, 'input_layernorm'):
         # LLaMA/Qwen/Mistral style
         ln = block.input_layernorm
