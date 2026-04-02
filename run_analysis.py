@@ -30,6 +30,7 @@ from lm_electrostatics.equations import (
     _get_position_embeddings, _call_block,
 )
 from lm_electrostatics.divergence import analyze_layers_perlayer, exact_divergence
+from lm_electrostatics.divergence_attention import analyze_attention_perlayer, analyze_attention_composed
 
 
 # ── data ──────────────────────────────────────────────────────
@@ -90,6 +91,16 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
 
     if div_method == "hutchinson":
         divs, cons_ratios = analyze_layers_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
+        # Also compute attention-only metrics
+        try:
+            attn_divs_perlayer, attn_cons_perlayer = analyze_attention_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
+            attn_divs_composed, attn_cons_composed = analyze_attention_composed(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
+        except Exception:
+            # If attention analysis fails (unsupported architecture), return zeros
+            attn_divs_perlayer = {l: 0.0 for l in layer_indices}
+            attn_cons_perlayer = {l: 0.0 for l in layer_indices}
+            attn_divs_composed = {l: 0.0 for l in layer_indices}
+            attn_cons_composed = {l: 0.0 for l in layer_indices}
     else:
         # Exact: full single-block Jacobian per layer
         from torch.func import jacfwd
@@ -119,7 +130,21 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    return {"perplexity": ppl, "divergences": divs, "conservativeness": cons_ratios}
+        # Attention-only not implemented for exact method
+        attn_divs_perlayer = {l: 0.0 for l in layer_indices}
+        attn_cons_perlayer = {l: 0.0 for l in layer_indices}
+        attn_divs_composed = {l: 0.0 for l in layer_indices}
+        attn_cons_composed = {l: 0.0 for l in layer_indices}
+
+    return {
+        "perplexity": ppl,
+        "divergences": divs,
+        "conservativeness": cons_ratios,
+        "attn_divergences_perlayer": attn_divs_perlayer,
+        "attn_conservativeness_perlayer": attn_cons_perlayer,
+        "attn_divergences_composed": attn_divs_composed,
+        "attn_conservativeness_composed": attn_cons_composed,
+    }
 
 
 # ── plots ─────────────────────────────────────────────────────
@@ -193,6 +218,108 @@ def plot_div_vs_ppl(results, layer_indices, out_dir):
         hovermode="closest",
     )
     path = os.path.join(out_dir, "perlayer_divergence_vs_perplexity.html")
+    fig.write_html(path)
+    print(f"Saved {path}")
+
+
+def plot_attention_conservativeness(results, layer_indices, out_dir):
+    """Violin: attention-only conservativeness (per-layer and composed)."""
+    # Per-layer attention conservativeness
+    fig = go.Figure()
+    for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
+        group = [r for r in results if r["label"] == label]
+        for l in layer_indices:
+            vals = [r["attn_conservativeness_perlayer"][l] for r in group if r["attn_conservativeness_perlayer"][l] != 0.0]
+            if vals:  # Only plot if we have non-zero values
+                fig.add_trace(go.Violin(
+                    x=[f"L{l}"] * len(vals), y=vals,
+                    legendgroup=label, scalegroup=label,
+                    name=f"{label}-dist" if l == layer_indices[0] else None,
+                    showlegend=(l == layer_indices[0]),
+                    side=side, line_color=color,
+                    meanline_visible=True,
+                ))
+    fig.update_layout(
+        title="Attention-Only Per-Layer Conservativeness (1=conservative, 0.5=random, 0=rotational)",
+        xaxis_title="Layer", yaxis_title="||S||²_F / ||J||²_F (Attention Sublayer)",
+        violinmode="overlay", hovermode="closest",
+    )
+    path = os.path.join(out_dir, "attention_perlayer_conservativeness_violin.html")
+    fig.write_html(path)
+    print(f"Saved {path}")
+
+    # Composed attention conservativeness
+    fig = go.Figure()
+    for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
+        group = [r for r in results if r["label"] == label]
+        for l in layer_indices:
+            vals = [r["attn_conservativeness_composed"][l] for r in group if r["attn_conservativeness_composed"][l] != 0.0]
+            if vals:
+                fig.add_trace(go.Violin(
+                    x=[f"L{l}"] * len(vals), y=vals,
+                    legendgroup=label, scalegroup=label,
+                    name=f"{label}-dist" if l == layer_indices[0] else None,
+                    showlegend=(l == layer_indices[0]),
+                    side=side, line_color=color,
+                    meanline_visible=True,
+                ))
+    fig.update_layout(
+        title="Attention-Only Composed Conservativeness (stacked attention sublayers)",
+        xaxis_title="Layer", yaxis_title="||S||²_F / ||J||²_F (Composed Attention)",
+        violinmode="overlay", hovermode="closest",
+    )
+    path = os.path.join(out_dir, "attention_composed_conservativeness_violin.html")
+    fig.write_html(path)
+    print(f"Saved {path}")
+
+
+def plot_attention_divergence(results, layer_indices, out_dir):
+    """Violin: attention-only divergence (per-layer and composed)."""
+    # Per-layer attention divergence
+    fig = go.Figure()
+    for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
+        group = [r for r in results if r["label"] == label]
+        for l in layer_indices:
+            vals = [r["attn_divergences_perlayer"][l] for r in group if r["attn_divergences_perlayer"][l] != 0.0]
+            if vals:
+                fig.add_trace(go.Violin(
+                    x=[f"L{l}"] * len(vals), y=vals,
+                    legendgroup=label, scalegroup=label,
+                    name=f"{label}-dist" if l == layer_indices[0] else None,
+                    showlegend=(l == layer_indices[0]),
+                    side=side, line_color=color,
+                    meanline_visible=True,
+                ))
+    fig.update_layout(
+        title="Attention-Only Per-Layer Divergence",
+        xaxis_title="Layer", yaxis_title="Divergence Tr(J) (Attention Sublayer)",
+        violinmode="overlay", hovermode="closest",
+    )
+    path = os.path.join(out_dir, "attention_perlayer_divergence_violin.html")
+    fig.write_html(path)
+    print(f"Saved {path}")
+
+    # Composed attention divergence
+    fig = go.Figure()
+    for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
+        group = [r for r in results if r["label"] == label]
+        for l in layer_indices:
+            vals = [r["attn_divergences_composed"][l] for r in group if r["attn_divergences_composed"][l] != 0.0]
+            if vals:
+                fig.add_trace(go.Violin(
+                    x=[f"L{l}"] * len(vals), y=vals,
+                    legendgroup=label, scalegroup=label,
+                    name=f"{label}-dist" if l == layer_indices[0] else None,
+                    showlegend=(l == layer_indices[0]),
+                    side=side, line_color=color,
+                    meanline_visible=True,
+                ))
+    fig.update_layout(
+        title="Attention-Only Composed Divergence",
+        xaxis_title="Layer", yaxis_title="Divergence Tr(J) (Composed Attention)",
+        violinmode="overlay", hovermode="closest",
+    )
+    path = os.path.join(out_dir, "attention_composed_divergence_violin.html")
     fig.write_html(path)
     print(f"Saved {path}")
 
@@ -272,6 +399,10 @@ def main():
         r["label"] = label
         r["divergences"] = {str(k): v for k, v in r["divergences"].items()}
         r["conservativeness"] = {str(k): v for k, v in r["conservativeness"].items()}
+        r["attn_divergences_perlayer"] = {str(k): v for k, v in r["attn_divergences_perlayer"].items()}
+        r["attn_conservativeness_perlayer"] = {str(k): v for k, v in r["attn_conservativeness_perlayer"].items()}
+        r["attn_divergences_composed"] = {str(k): v for k, v in r["attn_divergences_composed"].items()}
+        r["attn_conservativeness_composed"] = {str(k): v for k, v in r["attn_conservativeness_composed"].items()}
         results.append(r)
         avg_cons = sum(float(v) for v in r["conservativeness"].values()) / len(r["conservativeness"])
         pbar.set_postfix(label=label, ppl=f"{r['perplexity']:.0f}", cons=f"{avg_cons:.3f}")
@@ -290,11 +421,17 @@ def main():
     for r in results:
         r["divergences"] = {int(k): v for k, v in r["divergences"].items()}
         r["conservativeness"] = {int(k): v for k, v in r["conservativeness"].items()}
+        r["attn_divergences_perlayer"] = {int(k): v for k, v in r["attn_divergences_perlayer"].items()}
+        r["attn_conservativeness_perlayer"] = {int(k): v for k, v in r["attn_conservativeness_perlayer"].items()}
+        r["attn_divergences_composed"] = {int(k): v for k, v in r["attn_divergences_composed"].items()}
+        r["attn_conservativeness_composed"] = {int(k): v for k, v in r["attn_conservativeness_composed"].items()}
 
     # ── plots ──
     plot_violin_div_vs_layer(results, layer_indices, args.output_dir)
     plot_conservativeness_vs_layer(results, layer_indices, args.output_dir)
     plot_div_vs_ppl(results, layer_indices, args.output_dir)
+    plot_attention_conservativeness(results, layer_indices, args.output_dir)
+    plot_attention_divergence(results, layer_indices, args.output_dir)
 
     print(f"Done in {pbar.format_dict['elapsed']:.0f}s")
 
