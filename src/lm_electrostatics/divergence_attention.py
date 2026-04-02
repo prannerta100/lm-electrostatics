@@ -88,7 +88,6 @@ def analyze_attention_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, posi
 
     for l in layer_indices:
         h_in = hidden_at_layer[l - 1]  # input to block l
-        h_in_flat = h_in.reshape(-1)
 
         block = blocks[l]
         pos_emb = position_embeddings
