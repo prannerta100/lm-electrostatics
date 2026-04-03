@@ -38,10 +38,13 @@ def _call_attention_sublayer(block, hidden, position_embeddings=None):
     # Compute: X + Attn(LN(X))
     normed = ln(hidden)
 
+    # Build kwargs — always pass attention_mask=None since some architectures
+    # (GPT-NeoX, Qwen2, Mistral) require it as a positional arg with no default
+    kwargs = {"attention_mask": None}
     if position_embeddings is not None:
-        attn_out = attn(normed, position_embeddings=position_embeddings)
-    else:
-        attn_out = attn(normed)
+        kwargs["position_embeddings"] = position_embeddings
+
+    attn_out = attn(normed, **kwargs)
 
     # Handle tuple output (some models return (output, attention_weights))
     if isinstance(attn_out, tuple):
