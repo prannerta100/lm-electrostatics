@@ -27,7 +27,7 @@ MODELS=(
 )
 
 # Failed models (architecture or dtype issues):
-# "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,4,8,12,16,20,24,28,32,36,40,43"  # list index out of range
+# "openai/gpt-oss-20b|bfloat16|gpt-oss-20b|0,3,6,9,12,15,18,21,23"  # 24 layers total; was failing with wrong layer indices
 # "microsoft/phi-2|bfloat16|phi-2|0,4,8,12,16,20,24,28,31"  # dtype mismatch
 # "EleutherAI/pythia-12b|bfloat16|pythia-12b|0,4,8,12,16,20,24,28,32,35"  # dtype mismatch
 

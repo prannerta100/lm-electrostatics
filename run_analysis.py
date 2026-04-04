@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import random
 
@@ -91,18 +92,24 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
 
     if div_method == "hutchinson":
         divs, cons_ratios = analyze_layers_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
-        # Also compute attention-only metrics
+        # Also compute attention-only metrics (per-layer and composed separately)
         try:
             attn_divs_perlayer, attn_cons_perlayer = analyze_attention_perlayer(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
+        except Exception as attn_err:
+            analyze_one._attn_perlayer_fail = getattr(analyze_one, '_attn_perlayer_fail', 0) + 1
+            if analyze_one._attn_perlayer_fail <= 3:
+                tqdm.write(f"  ATTN_PERLAYER_WARN: {attn_err}")
+            attn_divs_perlayer = {l: float('nan') for l in layer_indices}
+            attn_cons_perlayer = {l: float('nan') for l in layer_indices}
+
+        try:
             attn_divs_composed, attn_cons_composed = analyze_attention_composed(blocks, H, x0, layer_indices, div_k, cons_k, position_embeddings=pos_emb)
         except Exception as attn_err:
-            if not getattr(analyze_one, '_attn_warned', False):
-                tqdm.write(f"  ATTN_WARN: {attn_err}")
-                analyze_one._attn_warned = True
-            attn_divs_perlayer = {l: 0.0 for l in layer_indices}
-            attn_cons_perlayer = {l: 0.0 for l in layer_indices}
-            attn_divs_composed = {l: 0.0 for l in layer_indices}
-            attn_cons_composed = {l: 0.0 for l in layer_indices}
+            analyze_one._attn_composed_fail = getattr(analyze_one, '_attn_composed_fail', 0) + 1
+            if analyze_one._attn_composed_fail <= 3:
+                tqdm.write(f"  ATTN_COMPOSED_WARN: {attn_err}")
+            attn_divs_composed = {l: float('nan') for l in layer_indices}
+            attn_cons_composed = {l: float('nan') for l in layer_indices}
     else:
         # Exact: full single-block Jacobian per layer
         from torch.func import jacfwd
@@ -133,10 +140,10 @@ def analyze_one(model, tokenizer, text, layer_indices, cons_k, div_method, div_k
                 torch.cuda.empty_cache()
 
         # Attention-only not implemented for exact method
-        attn_divs_perlayer = {l: 0.0 for l in layer_indices}
-        attn_cons_perlayer = {l: 0.0 for l in layer_indices}
-        attn_divs_composed = {l: 0.0 for l in layer_indices}
-        attn_cons_composed = {l: 0.0 for l in layer_indices}
+        attn_divs_perlayer = {l: float('nan') for l in layer_indices}
+        attn_cons_perlayer = {l: float('nan') for l in layer_indices}
+        attn_divs_composed = {l: float('nan') for l in layer_indices}
+        attn_cons_composed = {l: float('nan') for l in layer_indices}
 
     return {
         "perplexity": ppl,
@@ -231,7 +238,7 @@ def plot_attention_conservativeness(results, layer_indices, out_dir):
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
         for l in layer_indices:
-            vals = [r["attn_conservativeness_perlayer"][l] for r in group if r["attn_conservativeness_perlayer"][l] != 0.0]
+            vals = [r["attn_conservativeness_perlayer"][l] for r in group if not math.isnan(r["attn_conservativeness_perlayer"][l])]
             if vals:  # Only plot if we have non-zero values
                 fig.add_trace(go.Violin(
                     x=[f"L{l}"] * len(vals), y=vals,
@@ -255,7 +262,7 @@ def plot_attention_conservativeness(results, layer_indices, out_dir):
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
         for l in layer_indices:
-            vals = [r["attn_conservativeness_composed"][l] for r in group if r["attn_conservativeness_composed"][l] != 0.0]
+            vals = [r["attn_conservativeness_composed"][l] for r in group if not math.isnan(r["attn_conservativeness_composed"][l])]
             if vals:
                 fig.add_trace(go.Violin(
                     x=[f"L{l}"] * len(vals), y=vals,
@@ -282,7 +289,7 @@ def plot_attention_divergence(results, layer_indices, out_dir):
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
         for l in layer_indices:
-            vals = [r["attn_divergences_perlayer"][l] for r in group if r["attn_divergences_perlayer"][l] != 0.0]
+            vals = [r["attn_divergences_perlayer"][l] for r in group if not math.isnan(r["attn_divergences_perlayer"][l])]
             if vals:
                 fig.add_trace(go.Violin(
                     x=[f"L{l}"] * len(vals), y=vals,
@@ -306,7 +313,7 @@ def plot_attention_divergence(results, layer_indices, out_dir):
     for label, color, side in [("in", "blue", "negative"), ("out", "red", "positive")]:
         group = [r for r in results if r["label"] == label]
         for l in layer_indices:
-            vals = [r["attn_divergences_composed"][l] for r in group if r["attn_divergences_composed"][l] != 0.0]
+            vals = [r["attn_divergences_composed"][l] for r in group if not math.isnan(r["attn_divergences_composed"][l])]
             if vals:
                 fig.add_trace(go.Violin(
                     x=[f"L{l}"] * len(vals), y=vals,
@@ -413,20 +420,38 @@ def main():
             with open(checkpoint_path, "w") as f:
                 json.dump(results, f)
 
+    # Report attention analysis failures
+    perlayer_fails = getattr(analyze_one, '_attn_perlayer_fail', 0)
+    composed_fails = getattr(analyze_one, '_attn_composed_fail', 0)
+    if perlayer_fails or composed_fails:
+        print(f"\nAttention analysis failures: perlayer={perlayer_fails}/{len(results)}, composed={composed_fails}/{len(results)}")
+
     # ── save final ──
+    def _nan_to_none(obj):
+        if isinstance(obj, float) and math.isnan(obj):
+            return None
+        if isinstance(obj, dict):
+            return {k: _nan_to_none(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_nan_to_none(v) for v in obj]
+        return obj
+
     final_path = os.path.join(args.output_dir, "results.json")
     with open(final_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(_nan_to_none(results), f, indent=2)
     print(f"\nSaved {len(results)} results to {final_path}")
 
-    # Convert str keys back to int for plotting
+    # Convert str keys back to int for plotting (None -> NaN for filtering)
+    def _none_to_nan(v):
+        return float('nan') if v is None else v
+
     for r in results:
         r["divergences"] = {int(k): v for k, v in r["divergences"].items()}
         r["conservativeness"] = {int(k): v for k, v in r["conservativeness"].items()}
-        r["attn_divergences_perlayer"] = {int(k): v for k, v in r["attn_divergences_perlayer"].items()}
-        r["attn_conservativeness_perlayer"] = {int(k): v for k, v in r["attn_conservativeness_perlayer"].items()}
-        r["attn_divergences_composed"] = {int(k): v for k, v in r["attn_divergences_composed"].items()}
-        r["attn_conservativeness_composed"] = {int(k): v for k, v in r["attn_conservativeness_composed"].items()}
+        r["attn_divergences_perlayer"] = {int(k): _none_to_nan(v) for k, v in r["attn_divergences_perlayer"].items()}
+        r["attn_conservativeness_perlayer"] = {int(k): _none_to_nan(v) for k, v in r["attn_conservativeness_perlayer"].items()}
+        r["attn_divergences_composed"] = {int(k): _none_to_nan(v) for k, v in r["attn_divergences_composed"].items()}
+        r["attn_conservativeness_composed"] = {int(k): _none_to_nan(v) for k, v in r["attn_conservativeness_composed"].items()}
 
     # ── plots ──
     plot_violin_div_vs_layer(results, layer_indices, args.output_dir)
